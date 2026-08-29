@@ -1,0 +1,35 @@
+============================= test session starts =============================
+platform win32 -- Python 3.12.6, pytest-9.1.1, pluggy-1.6.0 -- C:\Users\razzk\Downloads\Friday mark 1\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\razzk\Downloads\Friday mark 1
+plugins: anyio-4.13.0, cov-7.1.0
+collecting ... collected 25 items
+
+tests/test_assistant_core.py::TestAssistantCore::test_lifecycle_start_stop PASSED [  4%]
+tests/test_assistant_core.py::TestAssistantCore::test_cancel_execution PASSED [  8%]
+tests/test_audio_tts.py::TestAudioTTS::test_sentence_splitting PASSED    [ 12%]
+tests/test_audio_tts.py::TestAudioTTS::test_empty_string_handling PASSED [ 16%]
+tests/test_audio_tts.py::TestAudioTTS::test_stop_clears_state PASSED     [ 20%]
+tests/test_desktop_controller.py::TestDesktopController::test_volume_clamping_and_get PASSED [ 24%]
+tests/test_desktop_controller.py::TestDesktopController::test_mute_and_unmute PASSED [ 28%]
+tests/test_desktop_controller.py::TestDesktopController::test_system_stats PASSED [ 32%]
+tests/test_desktop_controller.py::TestDesktopController::test_notes_crud PASSED [ 36%]
+tests/test_intent_router.py::TestIntentRouter::test_volume_intent_matching PASSED [ 40%]
+tests/test_intent_router.py::TestIntentRouter::test_time_and_date_matching PASSED [ 44%]
+tests/test_intent_router.py::TestIntentRouter::test_system_status_matching PASSED [ 48%]
+tests/test_intent_router.py::TestIntentRouter::test_timer_matching PASSED [ 52%]
+tests/test_intent_router.py::TestIntentRouter::test_unhandled_routes_to_llm PASSED [ 56%]
+test_llm_conversation.py::TestLLMConversation::test_sentence_streaming_logic PASSED [ 60%]
+test_llm_conversation.py::TestLLMConversation::test_graceful_offline_response PASSED [ 64%]
+test_llm_conversation.py::TestLLMConversation::test_natural_speech_phrasing PASSED [ 68%]
+test_tool_calling.py::TestToolCalling::test_volume_tool_execution PASSED [ 72%]
+test_tool_calling.py::TestToolCalling::test_mute_unmute_tool_execution PASSED [ 76%]
+test_tool_calling.py::TestToolCalling::test_system_diagnostics_tool PASSED [ 80%]
+test_tool_calling.py::TestToolCalling::test_router_fast_dispatch PASSED  [ 84%]
+test_error_scenarios.py::TestErrorResilience::test_ollama_timeout_resilience PASSED [ 88%]
+test_error_scenarios.py::TestErrorResilience::test_audio_stt_empty_recording PASSED [ 92%]
+test_error_scenarios.py::TestErrorResilience::test_permission_denied_power_commands PASSED [ 96%]
+test_error_scenarios.py::TestErrorResilience::test_tts_playback_device_error PASSED [100%]
+
+============================= 25 passed in 14.93s =============================
+

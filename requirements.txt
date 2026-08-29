@@ -1,0 +1,23 @@
+# Core Audio & AI
+numpy>=1.26.4
+requests>=2.32.3
+python-dotenv>=1.0.1
+sounddevice>=0.4.7
+soundfile>=0.12.1
+faster-whisper>=1.1.1
+openwakeword>=0.6.0
+
+# Text-to-Speech
+piper-tts>=1.4.2
+pyttsx3>=2.98
+
+# Windows Desktop Control & System Automation
+psutil>=6.1.0
+pystray>=0.19.5
+Pillow>=11.0.0
+pywin32>=306
+pycaw>=20240210
+screen-brightness-control>=0.23.0
+pyperclip>=1.9.0
+pyautogui>=0.9.54
+filelock>=3.16.1

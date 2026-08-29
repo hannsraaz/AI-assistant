@@ -1,0 +1,22 @@
+
+
+================================================================================
+SUMMARY - END-TO-END LATENCY REPORT (Time-To-First-Speech)
+================================================================================
+
+[PASS] | mute: 180.1ms (avg), 180.0-180.5ms (range), stdev: 0.20ms
+[PASS] | unmute: 180.0ms (avg), 180.0-180.1ms (range), stdev: 0.04ms
+[PASS] | show desktop: 180.4ms (avg), 180.1-181.6ms (range), stdev: 0.66ms
+[PASS] | what time is it: 180.3ms (avg), 180.1-180.9ms (range), stdev: 0.36ms
+[PASS] | battery status: 180.1ms (avg), 180.1-180.2ms (range), stdev: 0.03ms
+[PASS] | system status: 282.0ms (avg), 281.7-282.4ms (range), stdev: 0.28ms
+[FAIL] | tell me a joke: 2215.2ms (avg), 2200.3-2246.7ms (range), stdev: 18.97ms
+[FAIL] | what is machine learning: 2225.2ms (avg), 2217.2-2230.0ms (range), stdev: 5.00ms
+[FAIL] | explain python decorators: 2226.5ms (avg), 2212.5-2246.4ms (range), stdev: 14.01ms
+[PASS] | set volume to 50 percent: 1195.0ms (avg), 1124.3-1248.1ms (range), stdev: 52.72ms
+[PASS] | take a note review report: 180.6ms (avg), 180.4-180.9ms (range), stdev: 0.20ms
+
+Fast-Path Average TTFA: 197.2ms (target: < 600ms)
+LLM-Path Average TTFA: 1608.5ms (target: < 1200ms)
+
+All tests completed at: 2026-08-30T01:21:56.039287
