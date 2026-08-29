@@ -66,6 +66,34 @@ class TextToSpeechService:
         self._playback_thread = threading.Thread(target=self._playback_loop, daemon=True)
         self._playback_thread.start()
 
+    def warmup(self) -> None:
+        """Pre-warm Piper model and SAPI5 fallback engine."""
+        try:
+            if self.config.backend.lower() == "piper":
+                self._get_piper_voice()
+        except Exception:
+            pass
+        try:
+            self._init_pyttsx3_engine()
+        except Exception:
+            pass
+
+    def _init_pyttsx3_engine(self) -> Any:
+        if self._pyttsx3_engine is None:
+            try:
+                import pythoncom
+                pythoncom.CoInitialize()
+            except Exception:
+                pass
+            try:
+                import pyttsx3
+                self._pyttsx3_engine = pyttsx3.init()
+                self._pyttsx3_engine.setProperty("rate", self.config.rate)
+                self._pyttsx3_engine.setProperty("volume", self.config.volume)
+            except Exception:
+                pass
+        return self._pyttsx3_engine
+
     def speak(self, text: str) -> None:
         """Speak a complete string, automatically chunking into sentences if streaming enabled."""
         if not text.strip():

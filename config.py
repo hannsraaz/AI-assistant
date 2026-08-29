@@ -44,6 +44,8 @@ class WakeWordConfig:
     sample_rate: int = 16_000
     frame_length: int = 1_280
     device_index: int = -1
+    continuous_conversation: bool = True  # Keep listening for follow-ups without repeating wake word
+    conversation_timeout_seconds: float = 10.0  # Return to wake listening after silence
 
 
 @dataclass(slots=True)
@@ -110,6 +112,34 @@ class UIConfig:
 
 
 @dataclass(slots=True)
+class MemoryConfig:
+    enabled: bool = True
+    storage_file: str = "data/memory.json"
+    max_history_turns: int = 8
+
+
+@dataclass(slots=True)
+class VisionConfig:
+    enabled: bool = True
+    vision_model: str = "llama3.2-vision:latest"
+    fallback_model: str = "llava:latest"
+
+
+@dataclass(slots=True)
+class AutomationConfig:
+    enabled: bool = True
+    schedules_file: str = "data/schedules.json"
+    workflows_file: str = "data/workflows.json"
+
+
+@dataclass(slots=True)
+class ProactiveConfig:
+    enabled: bool = True
+    check_interval: float = 30.0
+    battery_alert_threshold: int = 15
+
+
+@dataclass(slots=True)
 class AppConfig:
     name: str = "Friday"
     wake_word_phrase: str = "Hey Jarvis"
@@ -122,6 +152,10 @@ class AppConfig:
     tts: TTSConfig = field(default_factory=TTSConfig)
     desktop: DesktopConfig = field(default_factory=DesktopConfig)
     ui: UIConfig = field(default_factory=UIConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
+    vision: VisionConfig = field(default_factory=VisionConfig)
+    automation: AutomationConfig = field(default_factory=AutomationConfig)
+    proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -178,6 +212,10 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
     top_level["tts"] = tts
     top_level["desktop"] = desktop
     top_level["ui"] = ui
+    top_level["memory"] = MemoryConfig(**_filter_known_fields(MemoryConfig, merged.get("memory", {})))
+    top_level["vision"] = VisionConfig(**_filter_known_fields(VisionConfig, merged.get("vision", {})))
+    top_level["automation"] = AutomationConfig(**_filter_known_fields(AutomationConfig, merged.get("automation", {})))
+    top_level["proactive"] = ProactiveConfig(**_filter_known_fields(ProactiveConfig, merged.get("proactive", {})))
 
     return AppConfig(**top_level)
 

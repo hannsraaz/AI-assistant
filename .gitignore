@@ -15,6 +15,9 @@ data/piper/
 data/screenshots/
 data/*.log
 data/conversation_memory.jsonl
+data/memory.json
+data/schedules.json
+data/workflows.json
 .env
 config.json
 biometric-payment-system/

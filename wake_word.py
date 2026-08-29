@@ -5,7 +5,9 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
+from audio_stream import ContinuousAudioCapture, get_global_audio_capture
 from config import WakeWordConfig, resolve_path
 
 
@@ -52,75 +54,106 @@ def prepare_wake_word_models(config: WakeWordConfig) -> list[Path]:
 
 
 class WakeWordDetector:
-    """Threaded openWakeWord detector with smooth lifecycle control."""
+    """High-reliability continuous wake-word detector consuming frames from ContinuousAudioCapture."""
 
-    def __init__(self, config: WakeWordConfig, logger: logging.Logger) -> None:
+    def __init__(
+        self,
+        config: WakeWordConfig,
+        logger: logging.Logger,
+        audio_capture: ContinuousAudioCapture | None = None,
+    ) -> None:
         self.config = config
         self.logger = logger
-        self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._model_paths: list[Path] = []
+        self.audio_capture = audio_capture
+        self._model = None
+        self._on_detect_callback: Callable[[], None] | None = None
+        self._last_detection_time = 0.0
+        self._active = threading.Event()
+        self._is_paused = False
+
+    def warmup(self) -> None:
+        self._get_model()
 
     def start(self, on_detect: Callable[[], None]) -> None:
-        if self._thread and self._thread.is_alive():
-            return
-        if self.config.enabled:
-            self._model_paths = prepare_wake_word_models(self.config)
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run, args=(on_detect,), daemon=True)
-        self._thread.start()
+        self._on_detect_callback = on_detect
+        self._active.set()
+        self._is_paused = False
+
+        if self.audio_capture is None:
+            self.audio_capture = get_global_audio_capture(
+                sample_rate=self.config.sample_rate,
+                device_index=self.config.device_index,
+            )
+
+        self.audio_capture.add_subscriber(self._on_audio_frame)
+        self.audio_capture.start()
+        self.logger.info("Wake word detector subscribed to continuous audio stream.")
 
     def stop(self) -> None:
-        self._stop_event.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1.5)
+        self._active.clear()
+        if self.audio_capture:
+            self.audio_capture.remove_subscriber(self._on_audio_frame)
 
-    def _run(self, on_detect: Callable[[], None]) -> None:
-        if not self.config.enabled:
+    def pause(self) -> None:
+        """Temporarily ignore wake word (e.g. while actively recording command)."""
+        self._is_paused = True
+
+    def resume(self) -> None:
+        """Resume wake word detection seamlessly."""
+        self._is_paused = False
+        if self._model:
+            try:
+                self._model.reset()
+            except Exception:
+                pass
+
+    def _on_audio_frame(self, float_chunk: Any, int16_chunk: Any) -> None:
+        if not self._active.is_set() or self._is_paused or not self.config.enabled:
+            return
+
+        model = self._get_model()
+        if model is None:
             return
 
         try:
-            import numpy as np
-            import sounddevice as sd
-            from openwakeword.model import Model
+            predictions = model.predict(int16_chunk)
+            label, score = _top_prediction(predictions)
 
-            models_arg = [str(p) for p in self._model_paths] if self._model_paths else self.config.model_names
+            if not label or score < self.config.threshold:
+                return
 
-            model = Model(
-                wakeword_models=models_arg,
-                enable_speex_noise_suppression=self.config.enable_noise_suppression,
-                vad_threshold=self.config.vad_threshold,
-                inference_framework=self.config.inference_framework,
-            )
-            device = None if self.config.device_index < 0 else self.config.device_index
-            last_detection_time = 0.0
+            now = time.monotonic()
+            if now - self._last_detection_time < self.config.debounce_seconds:
+                return
 
-            with sd.InputStream(
-                samplerate=self.config.sample_rate,
-                channels=1,
-                dtype="int16",
-                blocksize=self.config.frame_length,
-                device=device,
-            ) as stream:
-                self.logger.info("Wake word detector active.")
+            self._last_detection_time = now
+            self.logger.info("Wake word '%s' detected (confidence: %.2f)", label, score)
+            model.reset()
 
-                while not self._stop_event.is_set():
-                    chunk, _ = stream.read(self.config.frame_length)
-                    pcm = np.squeeze(chunk.copy()).astype(np.int16)
-                    predictions = model.predict(pcm)
-                    label, score = _top_prediction(predictions)
-
-                    if not label or score < self.config.threshold:
-                        continue
-                    if time.monotonic() - last_detection_time < self.config.debounce_seconds:
-                        continue
-
-                    last_detection_time = time.monotonic()
-                    self.logger.info("Wake word '%s' detected (confidence: %.2f)", label, score)
-                    model.reset()
-                    on_detect()
+            if self._on_detect_callback:
+                self._on_detect_callback()
         except Exception as exc:
-            self.logger.exception("Wake word detector stopped: %s", exc)
+            self.logger.warning("Wake word prediction error: %s", exc)
+
+    def _get_model(self) -> Any:
+        if self._model is None and self.config.enabled:
+            try:
+                from openwakeword.model import Model
+
+                model_paths = prepare_wake_word_models(self.config)
+                models_arg = [str(p) for p in model_paths] if model_paths else self.config.model_names
+
+                self._model = Model(
+                    wakeword_models=models_arg,
+                    enable_speex_noise_suppression=self.config.enable_noise_suppression,
+                    vad_threshold=self.config.vad_threshold,
+                    inference_framework=self.config.inference_framework,
+                )
+                self.logger.info("Wake-word openWakeWord model loaded.")
+            except Exception as exc:
+                self.logger.error("Failed to load wake word model: %s", exc)
+                self._model = None
+        return self._model
 
 
 def _top_prediction(predictions: dict[str, float] | list[dict[str, float]]) -> tuple[str, float]:

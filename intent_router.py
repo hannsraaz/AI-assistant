@@ -12,6 +12,7 @@ from typing import Any
 import requests
 
 from config import AppConfig
+from core.response_engine import ResponseEngine
 from desktop_controller import DesktopController
 
 
@@ -24,7 +25,7 @@ class IntentResult:
 
 
 class IntentRouter:
-    """Fast-path sub-50ms intent router for desktop commands, timers, and system actions."""
+    """Fast-path sub-50ms intent router for desktop commands, windows, apps, timers, and system actions."""
 
     def __init__(
         self,
@@ -83,19 +84,67 @@ class IntentRouter:
         if self._matches(lowered, [r"\bwhat(?:'s| is) the brightness\b"]):
             return IntentResult(handled=True, response=f"Brightness is set to {self.desktop.get_brightness()} percent.")
 
-        # 4. Windows & Desktop Management
-        if self._matches(lowered, [r"\bshow desktop\b", r"\bminimize all\b", r"\bminimize windows\b"]):
+        # 4. Windows & Window Management
+        if self._matches(lowered, [r"\bshow desktop\b", r"\bminimize all\b", r"\bminimize windows\b", r"\bminimize everything\b"]):
             return IntentResult(handled=True, response=self.desktop.minimize_all())
-        if self._matches(lowered, [r"\bclose active window\b", r"\bclose window\b", r"\bclose this\b", r"\bclose app\b"]):
+        if self._matches(lowered, [r"\bwhat windows are open\b", r"\blist windows\b", r"\bshow open windows\b"]):
+            res = self.desktop.registry.execute("windows.list")
+            return IntentResult(handled=True, response=ResponseEngine.format_tool_response("windows.list", res))
+        if self._matches(lowered, [r"\bwhat applications are open\b", r"\bwhat apps are open\b", r"\blist applications\b", r"\blist apps\b"]):
+            res = self.desktop.registry.execute("apps.list")
+            return IntentResult(handled=True, response=ResponseEngine.format_tool_response("apps.list", res))
+
+        # Focus / Switch to app
+        switch_app_match = re.search(r"\b(?:switch to|focus|bring up|bring)\s+(.+?)(?:\s+to the front|\s+window)?$", cleaned, re.IGNORECASE)
+        if switch_app_match:
+            target_app = switch_app_match.group(1).strip()
+            if target_app.lower() not in {"desktop", "the desktop", "window", "tab"}:
+                res = self.desktop.registry.execute("apps.focus", app_name=target_app)
+                if res.success:
+                    return IntentResult(handled=True, response=ResponseEngine.format_tool_response("apps.focus", res))
+
+        if self._matches(lowered, [r"\bmaximize (?:active |this )?window\b", r"\bmaximize\b"]):
+            res = self.desktop.registry.execute("windows.maximize")
+            return IntentResult(handled=True, response=ResponseEngine.format_tool_response("windows.maximize", res))
+        if self._matches(lowered, [r"\bminimize (?:active |this )?window\b", r"\bminimize this\b"]):
+            res = self.desktop.registry.execute("windows.minimize")
+            return IntentResult(handled=True, response=ResponseEngine.format_tool_response("windows.minimize", res))
+        if self._matches(lowered, [r"\brestore window\b", r"\bunmaximize\b"]):
+            res = self.desktop.registry.execute("windows.restore")
+            return IntentResult(handled=True, response=ResponseEngine.format_tool_response("windows.restore", res))
+
+        if self._matches(lowered, [r"\bclose active window\b", r"\bclose window\b", r"\bclose this\b", r"\bclose this window\b"]):
             return IntentResult(handled=True, response=self.desktop.close_active_window())
-        if self._matches(lowered, [r"\bswitch window\b", r"\bswitch app\b", r"\balt tab\b"]):
+
+        # Close specific app
+        close_app_match = re.search(r"\bclose\s+([a-zA-Z0-9\s]+)$", cleaned, re.IGNORECASE)
+        if close_app_match:
+            app_to_close = close_app_match.group(1).strip()
+            if app_to_close.lower() not in {"window", "this", "active window", "assistant"}:
+                res = self.desktop.registry.execute("apps.close", app_name=app_to_close, confirmed=True)
+                if res.success:
+                    return IntentResult(handled=True, response=ResponseEngine.format_tool_response("apps.close", res))
+
+        if self._matches(lowered, [r"\bswitch window\b", r"\balt tab\b"]):
             return IntentResult(handled=True, response=self.desktop.switch_window())
-        if self._matches(lowered, [r"\block pc\b", r"\block computer\b", r"\block workstation\b"]):
+        if self._matches(lowered, [r"\block (?:pc|computer|workstation)\b"]):
             return IntentResult(handled=True, response=self.desktop.lock_pc())
 
         # 5. Screenshots & Clipboard
+        if self._matches(lowered, [r"\btake a screenshot of (?:the )?active window\b", r"\bcapture active window\b", r"\bwindow screenshot\b"]):
+            return IntentResult(handled=True, response=self.desktop.take_screenshot(mode="active_window"))
         if self._matches(lowered, [r"\btake a screenshot\b", r"\bcapture screen\b", r"\bscreenshot\b"]):
-            return IntentResult(handled=True, response=self.desktop.take_screenshot())
+            return IntentResult(handled=True, response=self.desktop.take_screenshot(mode="fullscreen"))
+
+        copy_match = re.search(r"\bcopy\s+(?:\"|')?(.+?)(?:\"|')?\s+to (?:the )?clipboard\b", cleaned, re.IGNORECASE)
+        if copy_match:
+            text_to_copy = copy_match.group(1).strip()
+            return IntentResult(handled=True, response=self.desktop.set_clipboard_text(text_to_copy))
+
+        if self._matches(lowered, [r"\bclear (?:the )?clipboard\b", r"\bempty clipboard\b"]):
+            res = self.desktop.registry.execute("clipboard.clear")
+            return IntentResult(handled=True, response=ResponseEngine.format_tool_response("clipboard.clear", res))
+
         if self._matches(lowered, [r"\bread clipboard\b", r"\bwhat(?:'s| is) on (?:my )?clipboard\b", r"\bpaste clipboard\b"]):
             return IntentResult(handled=True, response=self.desktop.get_clipboard_text())
 
@@ -106,6 +155,15 @@ class IntentRouter:
             return IntentResult(handled=True, response=self.desktop.get_battery_info())
         if self._matches(lowered, [r"\bdisk space\b", r"\bfree storage\b", r"\bstorage\b", r"\bhard drive\b"]):
             return IntentResult(handled=True, response=self.desktop.get_disk_info())
+        if self._matches(lowered, [r"\bcpu usage\b", r"\bhow is the cpu\b"]):
+            res = self.desktop.registry.execute("system.cpu")
+            return IntentResult(handled=True, response=ResponseEngine.format_tool_response("system.cpu", res))
+        if self._matches(lowered, [r"\bram usage\b", r"\bmemory usage\b", r"\bhow much ram\b"]):
+            res = self.desktop.registry.execute("system.ram")
+            return IntentResult(handled=True, response=ResponseEngine.format_tool_response("system.ram", res))
+        if self._matches(lowered, [r"\bnetwork status\b", r"\bnetwork stats\b", r"\binternet status\b"]):
+            res = self.desktop.registry.execute("system.network")
+            return IntentResult(handled=True, response=ResponseEngine.format_tool_response("system.network", res))
 
         # 7. Time & Date
         if self._matches(lowered, [r"\bwhat.*time\b", r"\btell.*time\b", r"\bcurrent time\b", r"\btime right now\b", r"^time$"]):

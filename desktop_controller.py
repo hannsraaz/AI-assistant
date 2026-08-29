@@ -1,167 +1,110 @@
 from __future__ import annotations
 
-import ctypes
 import datetime
 import os
-import platform
 import subprocess
-import time
 import urllib.parse
 import webbrowser
 from pathlib import Path
 from typing import Any
 
-import psutil
-
 from config import DesktopConfig, resolve_path
+from core.response_engine import ResponseEngine
+from core.tools.permissions import PermissionManager
+from core.tools.registry import ToolRegistry
+from core.tools.windows import register_windows_tools
 
 
 class DesktopController:
-    """Windows desktop automation and system control engine for Friday."""
+    """Windows desktop automation and system control engine for Friday.
+    
+    Seamlessly integrates Friday's modular tool system while providing
+    full backward compatibility for existing assistant components and tests.
+    """
 
-    def __init__(self, config: DesktopConfig) -> None:
+    def __init__(self, config: DesktopConfig, registry: ToolRegistry | None = None) -> None:
         self.config = config
         self.screenshot_dir = resolve_path(config.screenshot_directory)
         self.screenshot_dir.mkdir(parents=True, exist_ok=True)
         self.notes_file = resolve_path(config.notes_file)
         self.notes_file.parent.mkdir(parents=True, exist_ok=True)
 
-        self._pycaw_volume = None
-        self._init_pycaw()
+        self.permissions = PermissionManager()
+        self.registry = registry or ToolRegistry(permission_manager=self.permissions)
+        register_windows_tools(self.registry, screenshot_dir=str(self.screenshot_dir))
+
+        # Permission overrides based on config
+        if self.config.allow_power_commands:
+            self.permissions.set_override("system.shutdown", True)
+            self.permissions.set_override("system.restart", True)
 
     # -------------------------------------------------------------------------
     # Audio & Volume Controls
     # -------------------------------------------------------------------------
 
-    def _init_pycaw(self) -> None:
-        try:
-            from comtypes import CLSCTX_ALL
-            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-
-            devices = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            self._pycaw_volume = ctypes.cast(interface, ctypes.POINTER(IAudioEndpointVolume))
-        except Exception:
-            self._pycaw_volume = None
-
     def get_volume(self) -> int:
-        if self._pycaw_volume is not None:
-            try:
-                current_vol = self._pycaw_volume.GetMasterVolumeLevelScalar()
-                return int(round(current_vol * 100))
-            except Exception:
-                pass
-        return 50
+        res = self.registry.execute("system.volume.get")
+        return res.data.get("volume", 50)
 
     def set_volume(self, percentage: int) -> str:
-        percentage = max(0, min(100, percentage))
-        if self._pycaw_volume is not None:
-            try:
-                self._pycaw_volume.SetMasterVolumeLevelScalar(percentage / 100.0, None)
-                return f"Volume set to {percentage} percent."
-            except Exception:
-                pass
-
-        # Fallback using nircmd or PowerShell
-        try:
-            val = int(65535 * (percentage / 100))
-            cmd = f"$w = (New-Object -ComObject WScript.Shell); [Audio]::SetVolume({percentage})"
-            subprocess.run(["powershell", "-Command", cmd], timeout=3, capture_output=True)
-        except Exception:
-            pass
-        return f"Volume set to {percentage} percent."
+        res = self.registry.execute("system.volume.set", percentage=percentage)
+        return ResponseEngine.format_tool_response("system.volume.set", res)
 
     def change_volume(self, delta: int) -> str:
-        current = self.get_volume()
-        target = max(0, min(100, current + delta))
-        return self.set_volume(target)
+        tool_name = "system.volume.up" if delta >= 0 else "system.volume.down"
+        res = self.registry.execute(tool_name, delta=abs(delta))
+        return ResponseEngine.format_tool_response(tool_name, res)
 
     def mute(self) -> str:
-        if self._pycaw_volume is not None:
-            try:
-                self._pycaw_volume.SetMute(1, None)
-                return "Audio muted."
-            except Exception:
-                pass
-        self._send_virtual_key(0xAD)  # VK_VOLUME_MUTE
-        return "Audio muted."
+        res = self.registry.execute("system.volume.mute")
+        return ResponseEngine.format_tool_response("system.volume.mute", res)
 
     def unmute(self) -> str:
-        if self._pycaw_volume is not None:
-            try:
-                self._pycaw_volume.SetMute(0, None)
-                return "Audio unmuted."
-            except Exception:
-                pass
-        self._send_virtual_key(0xAD)
-        return "Audio unmuted."
+        res = self.registry.execute("system.volume.unmute")
+        return ResponseEngine.format_tool_response("system.volume.unmute", res)
 
     def toggle_mute(self) -> str:
-        if self._pycaw_volume is not None:
-            try:
-                is_muted = self._pycaw_volume.GetMute()
-                self._pycaw_volume.SetMute(0 if is_muted else 1, None)
-                return "Audio unmuted." if is_muted else "Audio muted."
-            except Exception:
-                pass
-        self._send_virtual_key(0xAD)
-        return "Toggled mute."
+        status = self.registry.execute("system.volume.get")
+        is_muted = status.data.get("muted", False)
+        if is_muted:
+            return self.unmute()
+        return self.mute()
 
     # -------------------------------------------------------------------------
     # Media Playback Controls
     # -------------------------------------------------------------------------
 
     def media_play_pause(self) -> str:
-        self._send_virtual_key(0xB3)  # VK_MEDIA_PLAY_PAUSE
-        return "Toggled media playback."
+        res = self.registry.execute("media.play_pause")
+        return ResponseEngine.format_tool_response("media.play_pause", res)
 
     def media_next(self) -> str:
-        self._send_virtual_key(0xB0)  # VK_MEDIA_NEXT_TRACK
-        return "Playing next track."
+        res = self.registry.execute("media.next")
+        return ResponseEngine.format_tool_response("media.next", res)
 
     def media_previous(self) -> str:
-        self._send_virtual_key(0xB1)  # VK_MEDIA_PREV_TRACK
-        return "Playing previous track."
+        res = self.registry.execute("media.previous")
+        return ResponseEngine.format_tool_response("media.previous", res)
 
     def media_stop(self) -> str:
-        self._send_virtual_key(0xB2)  # VK_MEDIA_STOP
-        return "Stopped playback."
+        res = self.registry.execute("media.stop")
+        return ResponseEngine.format_tool_response("media.stop", res)
 
     # -------------------------------------------------------------------------
     # Display & Brightness Controls
     # -------------------------------------------------------------------------
 
     def get_brightness(self) -> int:
-        try:
-            import screen_brightness_control as sbc
-
-            val = sbc.get_brightness()
-            if isinstance(val, list) and val:
-                return int(val[0])
-            if isinstance(val, (int, float)):
-                return int(val)
-        except Exception:
-            pass
-        return 75
+        res = self.registry.execute("system.brightness.get")
+        return res.data.get("brightness", 75)
 
     def set_brightness(self, level: int) -> str:
-        level = max(0, min(100, level))
-        try:
-            import screen_brightness_control as sbc
-
-            sbc.set_brightness(level)
-            return f"Brightness set to {level} percent."
-        except Exception:
-            try:
-                cmd = f"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1,{level})"
-                subprocess.run(["powershell", "-Command", cmd], timeout=3, capture_output=True)
-                return f"Brightness adjusted to {level} percent."
-            except Exception as exc:
-                return f"Could not adjust brightness: {exc}"
+        res = self.registry.execute("system.brightness.set", level=level)
+        return ResponseEngine.format_tool_response("system.brightness.set", res)
 
     def change_brightness(self, delta: int) -> str:
-        current = self.get_brightness()
-        target = max(0, min(100, current + delta))
+        curr = self.get_brightness()
+        target = max(0, min(100, curr + delta))
         return self.set_brightness(target)
 
     # -------------------------------------------------------------------------
@@ -169,28 +112,16 @@ class DesktopController:
     # -------------------------------------------------------------------------
 
     def minimize_all(self) -> str:
-        try:
-            # Win + D
-            ctypes.windll.user32.keybd_event(0x5B, 0, 0, 0)
-            ctypes.windll.user32.keybd_event(0x44, 0, 0, 0)
-            ctypes.windll.user32.keybd_event(0x44, 0, 2, 0)
-            ctypes.windll.user32.keybd_event(0x5B, 0, 2, 0)
-            return "Showing desktop."
-        except Exception as exc:
-            return f"Could not minimize windows: {exc}"
+        res = self.registry.execute("windows.show_desktop")
+        return ResponseEngine.format_tool_response("windows.show_desktop", res)
 
     def close_active_window(self) -> str:
-        try:
-            # Alt + F4
-            ctypes.windll.user32.keybd_event(0x12, 0, 0, 0)
-            ctypes.windll.user32.keybd_event(0x73, 0, 0, 0)
-            ctypes.windll.user32.keybd_event(0x73, 0, 2, 0)
-            ctypes.windll.user32.keybd_event(0x12, 0, 2, 0)
-            return "Closed active window."
-        except Exception as exc:
-            return f"Failed to close window: {exc}"
+        res = self.registry.execute("windows.close", confirmed=True)
+        return ResponseEngine.format_tool_response("windows.close", res)
 
     def switch_window(self) -> str:
+        import ctypes
+        import time
         try:
             # Alt + Tab
             ctypes.windll.user32.keybd_event(0x12, 0, 0, 0)
@@ -203,103 +134,30 @@ class DesktopController:
             return f"Failed to switch window: {exc}"
 
     def lock_pc(self) -> str:
-        try:
-            ctypes.windll.user32.LockWorkStation()
-            return "Computer locked."
-        except Exception as exc:
-            return f"Failed to lock workstation: {exc}"
+        res = self.registry.execute("system.lock")
+        return ResponseEngine.format_tool_response("system.lock", res)
 
     # -------------------------------------------------------------------------
     # Screenshots & Clipboard
     # -------------------------------------------------------------------------
 
-    def take_screenshot(self, name: str | None = None) -> str:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{name or 'screenshot'}_{timestamp}.png"
-        output_path = self.screenshot_dir / filename
-
-        # Method 1: mss (Fastest and most reliable)
-        try:
-            import mss
-            import mss.tools
-
-            with mss.mss() as sct:
-                monitor = sct.monitors[0]  # Full virtual screen across all monitors
-                sct_img = sct.grab(monitor)
-                mss.tools.to_png(sct_img.rgb, sct_img.size, output=str(output_path))
-                return f"Screenshot saved as {filename}."
-        except Exception:
-            pass
-
-        # Method 2: PIL ImageGrab
-        try:
-            from PIL import ImageGrab
-
-            img = ImageGrab.grab(all_screens=True)
-            img.save(str(output_path), "PNG")
-            return f"Screenshot saved as {filename}."
-        except Exception:
-            pass
-
-        # Method 3: pywin32 GDI screen capture
-        try:
-            import win32api
-            import win32con
-            import win32gui
-            import win32ui
-
-            hdesktop = win32gui.GetDesktopWindow()
-            width = win32api.GetSystemMetrics(win32con.SM_CXVIRTUALSCREEN) or win32api.GetSystemMetrics(win32con.SM_CXSCREEN)
-            height = win32api.GetSystemMetrics(win32con.SM_CYVIRTUALSCREEN) or win32api.GetSystemMetrics(win32con.SM_CYSCREEN)
-            left = win32api.GetSystemMetrics(win32con.SM_XVIRTUALSCREEN) or 0
-            top = win32api.GetSystemMetrics(win32con.SM_YVIRTUALSCREEN) or 0
-
-            desktop_dc = win32gui.GetWindowDC(hdesktop)
-            img_dc = win32ui.CreateDCFromHandle(desktop_dc)
-            mem_dc = img_dc.CreateCompatibleDC()
-
-            screenshot = win32ui.CreateBitmap()
-            screenshot.CreateCompatibleBitmap(img_dc, width, height)
-            mem_dc.SelectObject(screenshot)
-            mem_dc.BitBlt((0, 0), (width, height), img_dc, (left, top), win32con.SRCCOPY)
-
-            screenshot.SaveBitmapFile(mem_dc, str(output_path))
-
-            win32gui.DeleteObject(screenshot.GetHandle())
-            mem_dc.DeleteDC()
-            img_dc.DeleteDC()
-            win32gui.ReleaseDC(hdesktop, desktop_dc)
-            return f"Screenshot saved as {filename}."
-        except Exception as exc:
-            return f"Screenshot failed: {exc}"
+    def take_screenshot(self, name: str | None = None, mode: str = "fullscreen") -> str:
+        res = self.registry.execute("screenshot.take", name=name, mode=mode)
+        return ResponseEngine.format_tool_response("screenshot.take", res)
 
     def get_clipboard_text(self) -> str:
-        try:
-            import pyperclip
-
-            text = pyperclip.paste()
-            if not text.strip():
-                return "The clipboard is currently empty."
-            preview = text[:150] + ("..." if len(text) > 150 else "")
-            return f"Clipboard contains: {preview}"
-        except Exception as exc:
-            return f"Could not read clipboard: {exc}"
+        res = self.registry.execute("clipboard.read")
+        return ResponseEngine.format_tool_response("clipboard.read", res)
 
     def set_clipboard_text(self, text: str) -> str:
-        try:
-            import pyperclip
-
-            pyperclip.copy(text)
-            return "Copied text to clipboard."
-        except Exception as exc:
-            return f"Could not copy to clipboard: {exc}"
+        res = self.registry.execute("clipboard.write", text=text)
+        return ResponseEngine.format_tool_response("clipboard.write", res)
 
     def type_text(self, text: str) -> str:
         try:
             import pyautogui
-
             pyautogui.write(text, interval=0.01)
-            return f"Typed text."
+            return "Typed text."
         except Exception as exc:
             return f"Could not type text: {exc}"
 
@@ -308,84 +166,39 @@ class DesktopController:
     # -------------------------------------------------------------------------
 
     def get_system_status(self) -> str:
-        cpu = psutil.cpu_percent(interval=0.1)
-        ram = psutil.virtual_memory().percent
-        battery_info = psutil.sensors_battery()
+        cpu_res = self.registry.execute("system.cpu")
+        ram_res = self.registry.execute("system.ram")
+        bat_res = self.registry.execute("system.battery")
 
-        status_parts = [f"CPU usage is at {cpu:.0f}%", f"RAM usage is at {ram:.0f}%"]
-        if battery_info:
-            plugged = "plugged in" if battery_info.power_plugged else "on battery"
-            status_parts.append(f"Battery is at {battery_info.percent:.0f}% ({plugged})")
+        cpu = cpu_res.data.get("cpu_percent", 0)
+        ram = ram_res.data.get("percent", 0)
+        parts = [f"CPU usage is at {cpu:.0f}%", f"RAM usage is at {ram:.0f}%"]
 
-        return ". ".join(status_parts) + "."
+        if bat_res.data.get("has_battery", False):
+            plugged = "plugged in" if bat_res.data.get("charging") else "on battery"
+            parts.append(f"Battery is at {bat_res.data.get('percent')}% ({plugged})")
+
+        return ". ".join(parts) + "."
 
     def get_battery_info(self) -> str:
-        battery = psutil.sensors_battery()
-        if not battery:
-            return "No battery sensor detected (desktop workstation)."
-        plugged = "charging" if battery.power_plugged else "discharging"
-        return f"Battery is at {battery.percent:.0f}%, currently {plugged}."
+        res = self.registry.execute("system.battery")
+        return ResponseEngine.format_tool_response("system.battery", res)
 
     def get_disk_info(self) -> str:
-        usage = psutil.disk_usage("C:\\")
-        free_gb = usage.free / (1024**3)
-        total_gb = usage.total / (1024**3)
-        return f"C: drive has {free_gb:.1f} GB free out of {total_gb:.1f} GB ({usage.percent}% used)."
+        res = self.registry.execute("system.disk")
+        return ResponseEngine.format_tool_response("system.disk", res)
 
     # -------------------------------------------------------------------------
     # Applications & Web Automation
     # -------------------------------------------------------------------------
 
     def open_app_or_url(self, target: str) -> str:
-        target_lower = target.strip().lower()
+        # 1. Try apps.open tool
+        res = self.registry.execute("apps.open", app_name=target)
+        if res.success:
+            return ResponseEngine.format_tool_response("apps.open", res)
 
-        # Known common aliases
-        app_map = {
-            "chrome": ["chrome"],
-            "google chrome": ["chrome"],
-            "edge": ["msedge"],
-            "microsoft edge": ["msedge"],
-            "firefox": ["firefox"],
-            "brave": ["brave"],
-            "vs code": ["code"],
-            "vscode": ["code"],
-            "visual studio code": ["code"],
-            "notepad": ["notepad"],
-            "calculator": ["calc"],
-            "calc": ["calc"],
-            "spotify": ["spotify"],
-            "explorer": ["explorer"],
-            "file explorer": ["explorer"],
-            "files": ["explorer"],
-            "cmd": ["cmd"],
-            "command prompt": ["cmd"],
-            "terminal": ["wt", "powershell"],
-            "powershell": ["powershell"],
-            "task manager": ["taskmgr"],
-            "settings": ["start", "ms-settings:"],
-            "control panel": ["control"],
-            "paint": ["mspaint"],
-            "word": ["winword"],
-            "excel": ["excel"],
-            "powerpoint": ["powerpnt"],
-        }
-
-        if target_lower in app_map:
-            cmd = app_map[target_lower]
-            try:
-                subprocess.Popen(cmd, shell=True)
-                return f"Opening {target}."
-            except Exception:
-                pass
-
-        # Try shell start
-        try:
-            os.startfile(target)
-            return f"Opening {target}."
-        except Exception:
-            pass
-
-        # Fallback to web search
+        # 2. Fallback to web search
         return self.search_web(target)
 
     def search_web(self, query: str) -> str:
@@ -416,7 +229,6 @@ class DesktopController:
                 os.startfile(str(target))
                 return f"Opening {folder_name} folder."
 
-        # Try arbitrary path
         p = Path(folder_name).expanduser()
         if p.exists() and p.is_dir():
             os.startfile(str(p))
@@ -440,7 +252,7 @@ class DesktopController:
         lines = self.notes_file.read_text(encoding="utf-8").strip().splitlines()
         if not lines:
             return "Your notes file is empty."
-        recent = lines[-3:]  # read last 3 notes
+        recent = lines[-3:]
         return "Your recent notes: " + " | ".join(recent)
 
     # -------------------------------------------------------------------------
@@ -450,21 +262,6 @@ class DesktopController:
     def shutdown(self, restart: bool = False) -> str:
         if not self.config.allow_power_commands:
             return "Power commands are currently disabled in config.json for safety."
-        action_flag = "/r" if restart else "/s"
-        try:
-            subprocess.Popen(["shutdown", action_flag, "/t", "10"])
-            action = "Restarting" if restart else "Shutting down"
-            return f"{action} the computer in 10 seconds."
-        except Exception as exc:
-            return f"Failed power command: {exc}"
-
-    # -------------------------------------------------------------------------
-    # Helpers
-    # -------------------------------------------------------------------------
-
-    def _send_virtual_key(self, vk_code: int) -> None:
-        try:
-            ctypes.windll.user32.keybd_event(vk_code, 0, 0, 0)
-            ctypes.windll.user32.keybd_event(vk_code, 0, 2, 0)
-        except Exception:
-            pass
+        tool_name = "system.restart" if restart else "system.shutdown"
+        res = self.registry.execute(tool_name, confirmed=True)
+        return ResponseEngine.format_tool_response(tool_name, res)

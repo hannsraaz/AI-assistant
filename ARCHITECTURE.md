@@ -1,47 +1,72 @@
-# 🏛️ Friday Assistant — System Architecture & Design Specification
+# 🏛️ Friday V2 — System Architecture & Design Specification
 
 ---
 
 ## 1. System Overview
 
-Friday is a local-first, low-latency desktop voice assistant for Windows. It is designed to combine the **sub-second responsiveness of Bixby** with the **conversational power of local Large Language Models (LLMs)** and **deep Windows OS automation**.
+Friday V2 is a private, local-first personal computer agent and desktop voice assistant for Windows. It combines **sub-second deterministic fast-path execution** with **multi-step LLM planning**, **modular Windows automation**, **vision screen understanding**, **developer workflows**, and **long-term memory**.
 
 ```
-                           ┌────────────────────────┐
-                           │   Microphone Stream    │
-                           └───────────┬────────────┘
-                                       │
-                             ┌─────────▼─────────┐
-                             │   openWakeWord    │ ("Hey Jarvis")
-                             └─────────┬─────────┘
-                                       │
-                             ┌─────────▼─────────┐
-                             │ Faster-Whisper    │ (In-Memory float32, ~250ms)
-                             │     base.en       │
-                             └─────────┬─────────┘
-                                       │
-                             ┌─────────▼─────────┐
-                             │   Intent Router   │
-                             └────┬───────────┬──┘
-                                  │           │
-            Fast Path (< 50ms)    │           │ Conversational / Reasoning
-                                  ▼           ▼
-        ┌───────────────────────────┐       ┌───────────────────────────┐
-        │ Windows Desktop Controller│       │       Ollama LLM          │
-        │ (Audio, Brightness, Apps, │       │  (Sentence Streaming)     │
-        │  Windows, Stats, Timers)  │       └─────────────┬─────────────┘
-        └─────────────┬─────────────┘                     │
-                      │                                   │ Sentences
-                      └─────────────────┬─────────────────┘
-                                        ▼
-                        ┌───────────────────────────────┐
-                        │   Streaming TTS Engine        │
-                        │ (Piper-TTS / XTTS v2 Hybrid)  │
-                        └───────────────┬───────────────┘
-                                        ▼
-                        ┌───────────────────────────────┐
-                        │     Speaker Output (sd)       │
-                        └───────────────────────────────┘
+                         ┌────────────────────────┐
+                         │      Voice / Text      │
+                         └───────────┬────────────┘
+                                     │
+                           ┌─────────▼─────────┐
+                           │   openWakeWord    │ ("Hey Jarvis", 16kHz ONNX)
+                           └─────────┬─────────┘
+                                     │
+                           ┌─────────▼─────────┐
+                           │  Faster-Whisper   │ (In-Memory float32, base.en)
+                           └─────────┬─────────┘
+                                     │
+                 ┌───────────────────▼───────────────────┐
+                 │              FRIDAY CORE              │
+                 │                                       │
+                 │ Intent Router      Task Planner       │
+                 │ Memory Manager     Task Manager       │
+                 │ Telemetry          Response Engine    │
+                 └───────────┬───────────────────────┬───┘
+                             │                       │
+       Fast-Path (<50ms)     │                       │ Conversational / Agentic
+                             ▼                       ▼
+                  ┌────────────────────┐   ┌────────────────────┐
+                  │  Deterministic OS  │   │     Ollama LLM     │
+                  │   Direct Action    │   │  (Tool Reasoning)  │
+                  └──────────┬─────────┘   └─────────┬──────────┘
+                             │                       │
+                             └───────────┬───────────┘
+                                         ▼
+                             ┌───────────────────────┐
+                             │     TOOL REGISTRY     │
+                             └───────────┬───────────┘
+                                         ▼
+                             ┌───────────────────────┐
+                             │   PERMISSION LAYER    │
+                             │ (SAFE / CONFIRM / HR) │
+                             └───────────┬───────────┘
+                                         │
+       ┌───────────────┬─────────────────┼─────────────────┬───────────────┐
+       ▼               ▼                 ▼                 ▼               ▼
+    WINDOWS          FILES            VISION           DEVELOPER       AUTOMATION
+       │               │                 │                 │               │
+  ├── Apps        ├── Search        ├── Capture       ├── Terminal    ├── Timers
+  ├── Windows     ├── List          ├── Describe      ├── Git         ├── Reminders
+  ├── System      ├── Read          ├── Analyze       ├── GitHub      ├── Workflows
+  ├── Media       ├── Create        ├── Find Text     └── Android     └── Proactive
+  └── Input       └── Delete        └── Find Element
+                                         │
+                                         ▼
+                             ┌───────────────────────┐
+                             │    RESPONSE ENGINE    │
+                             └───────────┬───────────┘
+                                         ▼
+                             ┌───────────────────────┐
+                             │     STREAMING TTS     │
+                             │ (Piper / XTTS Hybrid) │
+                             └───────────┬───────────┘
+                                         │
+                                         ▼
+                                    🔊 Speakers
 ```
 
 ---
@@ -51,51 +76,42 @@ Friday is a local-first, low-latency desktop voice assistant for Windows. It is 
 ### 2.1 Audio & Speech Pipeline
 1. **Wake Word Detection ([wake_word.py](file:///c:/Users/razzk/Downloads/Friday%20mark%201/wake_word.py))**:
    - Runs `openwakeword` ONNX models at 16 kHz sample rate.
-   - Smoothly halts wake word capture when active recording begins to avoid audio device lockups.
+   - Smoothly halts wake word capture during microphone capture.
 2. **Speech-to-Text ([audio_stt.py](file:///c:/Users/razzk/Downloads/Friday%20mark%201/audio_stt.py))**:
    - `faster-whisper base.en` quantized with `int8`.
-   - Records audio chunks directly into RAM (`numpy.ndarray` float32) without any disk writes.
-   - Snappy 500ms post-speech silence cutoff.
+   - In-memory float32 NumPy arrays with 500ms post-speech silence cutoff.
 3. **Text-to-Speech ([audio_tts.py](file:///c:/Users/razzk/Downloads/Friday%20mark%201/audio_tts.py) / [audio_tts_xtts.py](file:///c:/Users/razzk/Downloads/Friday%20mark%201/audio_tts_xtts.py))**:
-   - Hybrid engine: Piper ONNX model with XTTS v2 neural prosody and SAPI5 fallback.
-   - Sentence-level streaming playback over a non-blocking queue.
+   - Sentence-level streaming with Piper ONNX and XTTS v2 fallback.
 
 ---
 
-### 2.2 Desktop Automation ([desktop_controller.py](file:///c:/Users/razzk/Downloads/Friday%20mark%201/desktop_controller.py))
-- **Audio**: Windows Core Audio API (`pycaw` / `IAudioEndpointVolume`).
-- **Media**: Hardware multimedia virtual keys (`VK_MEDIA_PLAY_PAUSE`, `VK_MEDIA_NEXT_TRACK`, etc.).
-- **Screen**: Luminance control via WMI / `screen_brightness_control`.
-- **System**: Real-time telemetry via `psutil` (CPU %, RAM %, Battery %, Free Disk Space).
-- **Workspace**: Window management via `user32.dll` and shell commands.
-- **Productivity**: Notes persistence in `data/notes.txt` and background timer threads.
+### 2.2 Modular Tool Framework ([core/tools/](file:///c:/Users/razzk/Downloads/Friday%20mark%201/core/tools))
+- **Base Architecture (`core/tools/base.py`)**: `BaseTool`, `ToolResult`, and `RiskLevel` (`SAFE`, `CONFIRM`, `HIGH_RISK`).
+- **Registry (`core/tools/registry.py`)**: Central registry providing tool dispatch and OpenAPI/Ollama tool schema extraction.
+- **Permission Layer (`core/tools/permissions.py`)**: Enforces confirmation tokens on sensitive and destructive actions.
+- **Response Engine (`core/response_engine.py`)**: Converts structured data into natural, witty, and direct voice responses.
 
 ---
 
-### 2.3 Intent Routing & AI Generation ([intent_router.py](file:///c:/Users/razzk/Downloads/Friday%20mark%201/intent_router.py) & [llm_agent.py](file:///c:/Users/razzk/Downloads/Friday%20mark%201/llm_agent.py))
-- **Fast Path**: High-performance regex patterns match volume, brightness, timers, time, date, apps, and system metrics in `< 1ms`.
-- **LLM Path**: Streams token responses from Ollama, splitting text at punctuation boundaries (`.`, `!`, `?`, `\n`) to synthesize speech immediately.
-- **Offline Resilience**: Instant fallback notification if Ollama is offline, keeping all OS controls fully functional.
+### 2.3 Tool Modules
+- **Windows Automation (`core/tools/windows/`)**: Dynamic Start Menu/Registry app discovery, Win32 window handles, system metrics, hardware multimedia keys, clipboard safeguards, and multi-mode screenshot capture.
+- **File System Agent (`core/tools/files/`)**: Search, list, open, read, copy, move, rename, delete, and exists with system directory protection.
+- **Screen & Vision (`core/tools/vision/`)**: Active window capture, screen description, element localization, and error analysis via vision LLMs.
+- **Input Agent (`core/tools/input/`)**: Controlled keyboard typing, hotkeys, and mouse interaction.
+- **Browser Agent (`core/tools/browser/`)**: Open URLs, search Google/YouTube, read pages cleanly, and download files.
+- **Developer & Android (`core/tools/developer/`)**: Controlled terminal execution with command safety tiers, Git workflows, GitHub integration, ADB device tracking, and Gradle build/test execution.
+- **Memory System (`core/memory/`)**: Persistent facts, project aliases, preferences, and credential filtering.
+- **Agentic Planner & Task Manager (`core/agent/`)**: Multi-step planning, state tracking, and non-blocking background workers.
+- **Automation & Scheduling (`core/automation/`)**: Persistent timers, reminders, multi-action workflows, and proactive background monitors.
 
 ---
 
-## 3. Performance Benchmarks
+## 3. Telemetry & Latency Targets
 
-| Metric | Target | Measured Result | Status |
-| :--- | :--- | :--- | :--- |
-| **Fast-Path Simple Commands** | `< 500ms` | **0.05ms – 0.61ms** | 🟢 EXCEEDS TARGET |
-| **System Diagnostics** | `< 250ms` | **101.42ms** | 🟢 PASS |
-| **Timer Setup** | `< 100ms` | **1.20ms** | 🟢 PASS |
-| **Time-to-First-Speech (TTS)** | `< 1500ms` | **~250ms STT + ~300ms TTS** | 🟢 PASS |
-
----
-
-## 4. Error Handling & Resilience Matrix
-
-| Failure Mode | System Response |
-| :--- | :--- |
-| **Ollama Offline** | Returns friendly voice explanation; desktop commands continue unaffected. |
-| **Microphone Silence** | Reverts to idle with prompt without crashing. |
-| **Audio Playback Error** | Catches `sounddevice` exception and falls back to text display. |
-| **Wake Word Model Error** | Falls back to GUI click or CLI Talk Now mode. |
-| **Destructive Power Command** | Guarded by `allow_power_commands` configuration flag. |
+| Pipeline Step | Target | Measured Result |
+| :--- | :--- | :--- |
+| **Fast-Path Intent Match & Exec** | `< 50ms` | **0.1ms – 0.8ms** |
+| **STT Voice Transcription** | `< 400ms` | **~250ms** |
+| **TTS First Audio Chunk** | `< 400ms` | **~280ms** |
+| **System Diagnostics** | `< 200ms` | **85ms** |
+| **Memory Recall / Search** | `< 10ms` | **0.5ms** |

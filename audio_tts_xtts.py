@@ -48,6 +48,13 @@ class XTTSStreamingTTS:
         # Attempt background load of XTTS v2
         threading.Thread(target=self._load_xtts_model, daemon=True).start()
 
+    def warmup(self) -> None:
+        """Pre-warm TTS fallback engine."""
+        try:
+            self._fallback_engine.warmup()
+        except Exception:
+            pass
+
     def _load_xtts_model(self) -> None:
         try:
             from TTS.api import TTS
