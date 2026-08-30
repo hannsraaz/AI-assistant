@@ -11,6 +11,16 @@ import numpy as np
 import sounddevice as sd
 
 from config import TTSConfig, resolve_path
+from core.language.hinglish_normalizer import global_hinglish_normalizer
+from core.voice.prosody_engine import ProsodySegment, global_prosody_engine
+from core.voice.tts_engine import (
+    AutoRoutingTTSEngine,
+    BaseTTSEngine,
+    HinglishNeuralTTSEngine,
+    IndicVoiceTTSEngine,
+    PiperTTSEngine,
+    SAPI5TTSEngine,
+)
 
 
 class TTSError(RuntimeError):
@@ -18,7 +28,8 @@ class TTSError(RuntimeError):
 
 
 def prepare_tts_assets(config: TTSConfig) -> list[Path]:
-    if config.backend.lower() != "piper":
+    backend = config.backend.lower()
+    if backend not in ("piper", "auto", "hinglish", "indicvoice"):
         return []
 
     try:
@@ -46,6 +57,7 @@ class _TTSPlaybackItem:
     audio: np.ndarray | None
     sample_rate: int = 22050
     text: str = ""
+    pause_after_ms: int = 80
     is_sentinel: bool = False
 
 
@@ -54,6 +66,7 @@ class TextToSpeechService:
 
     def __init__(self, config: TTSConfig) -> None:
         self.config = config
+        self.engine_router = AutoRoutingTTSEngine(config)
         self._piper_voice: Any = None
         self._pyttsx3_engine: Any = None
         self._lock = threading.Lock()
@@ -69,7 +82,7 @@ class TextToSpeechService:
     def warmup(self) -> None:
         """Pre-warm Piper model and SAPI5 fallback engine."""
         try:
-            if self.config.backend.lower() == "piper":
+            if self.config.backend.lower() in ("piper", "auto", "hinglish", "indicvoice"):
                 self._get_piper_voice()
         except Exception:
             pass
@@ -95,25 +108,43 @@ class TextToSpeechService:
         return self._pyttsx3_engine
 
     def speak(self, text: str) -> None:
-        """Speak a complete string, automatically chunking into sentences if streaming enabled."""
+        """Speak a complete string, automatically applying prosody analysis and streaming."""
         if not text.strip():
             return
-        sentences = self.split_sentences(text)
-        for sentence in sentences:
+        segments = global_prosody_engine.segment_speech_with_prosody(text)
+        if not segments:
+            segments = [ProsodySegment(text=text.strip())]
+
+        for seg in segments:
             if self._stop_event.is_set():
                 break
-            self._synthesize_and_queue(sentence)
+            self._synthesize_and_queue(
+                seg.text,
+                rate_multiplier=seg.rate_multiplier,
+                pause_after_ms=seg.pause_after_ms,
+            )
 
     def speak_sentence(self, sentence: str) -> None:
-        """Speak a single sentence immediately."""
+        """Speak a single sentence immediately with prosody."""
         clean = sentence.strip()
         if clean:
-            self._synthesize_and_queue(clean)
+            segments = global_prosody_engine.segment_speech_with_prosody(clean, enable_fillers=False)
+            if segments:
+                for seg in segments:
+                    self._synthesize_and_queue(
+                        seg.text,
+                        rate_multiplier=seg.rate_multiplier,
+                        pause_after_ms=seg.pause_after_ms,
+                    )
+            else:
+                self._synthesize_and_queue(clean)
 
     def stop(self) -> None:
         """Interrupt and stop all current and queued speech immediately."""
         self._stop_event.set()
         sd.stop()
+        if hasattr(self, "engine_router"):
+            self.engine_router.stop()
         # Drain play queue
         while not self._play_queue.empty():
             try:
@@ -146,40 +177,23 @@ class TextToSpeechService:
                 sentences.append(cleaned)
         return sentences
 
-    def _synthesize_and_queue(self, sentence: str) -> None:
-        if self.config.backend.lower() == "piper":
-            try:
-                voice = self._get_piper_voice()
-                from piper import SynthesisConfig
-
-                speaker_id = None if self.config.piper_speaker_id < 0 else self.config.piper_speaker_id
-                synthesis_config = SynthesisConfig(
-                    speaker_id=speaker_id,
-                    length_scale=self.config.piper_length_scale,
-                    noise_scale=self.config.piper_noise_scale,
-                    noise_w_scale=self.config.piper_noise_w_scale,
-                    volume=self.config.volume,
-                )
-
-                segments = [
-                    chunk.audio_float_array for chunk in voice.synthesize(sentence, syn_config=synthesis_config)
-                ]
-                if segments:
-                    audio = np.concatenate(segments).astype(np.float32)
-                    self._play_queue.put(
-                        _TTSPlaybackItem(
-                            audio=audio,
-                            sample_rate=voice.config.sample_rate,
-                            text=sentence,
-                        )
+    def _synthesize_and_queue(
+        self, sentence: str, rate_multiplier: float = 1.0, pause_after_ms: int = 80
+    ) -> None:
+        normalized = global_hinglish_normalizer.normalize_for_tts(sentence)
+        try:
+            audio, sample_rate = self.engine_router.synthesize(normalized, rate_multiplier=rate_multiplier)
+            if audio is not None:
+                self._play_queue.put(
+                    _TTSPlaybackItem(
+                        audio=audio,
+                        sample_rate=sample_rate,
+                        text=sentence,
+                        pause_after_ms=pause_after_ms,
                     )
-                return
-            except Exception:
-                # Fallback to pyttsx3 if piper fails
-                pass
-
-        # Native SAPI5 / pyttsx3 fallback
-        self._speak_with_pyttsx3(sentence)
+                )
+        except Exception as exc:
+            pass
 
     def _get_piper_voice(self) -> Any:
         if self._piper_voice is None:
@@ -216,6 +230,8 @@ class TextToSpeechService:
             pass
 
     def _playback_loop(self) -> None:
+        import time
+
         while True:
             item = self._play_queue.get()
             if item.is_sentinel:
@@ -224,9 +240,18 @@ class TextToSpeechService:
                 self._is_speaking.set()
                 try:
                     sd.play(item.audio, samplerate=item.sample_rate)
-                    sd.wait()
+                    # Responsive check every 15ms so barge-in cancels audio instantly
+                    while not self._stop_event.is_set():
+                        stream = sd.get_stream()
+                        if stream is None or not stream.active:
+                            break
+                        time.sleep(0.015)
+                    if self._stop_event.is_set():
+                        sd.stop()
+                    elif item.pause_after_ms > 0 and not self._play_queue.empty():
+                        time.sleep(min(0.25, item.pause_after_ms / 1000.0))
                 except Exception:
                     pass
                 finally:
-                    if self._play_queue.empty():
+                    if self._play_queue.empty() or self._stop_event.is_set():
                         self._is_speaking.clear()

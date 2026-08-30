@@ -19,6 +19,9 @@ from core.automation import (
     WorkflowEngine,
     register_automation_tools,
 )
+from core.context_builder import ContextBuilder
+from core.event_bus import global_event_bus
+from core.hinglish_normalizer import HinglishNormalizer, UserLanguage
 from core.memory import MemoryManager, register_memory_tools
 from core.response_engine import ResponseEngine
 from core.telemetry import TurnTelemetry, global_telemetry
@@ -96,6 +99,7 @@ class VoiceAssistant:
         register_developer_tools(self.registry)
 
         self.memory = register_memory_tools(self.registry, MemoryManager(self.config.memory.storage_file))
+        self.context_builder = ContextBuilder(memory_manager=self.memory)
         self.task_manager = register_task_tools(self.registry, TaskManager(on_task_completed=self._on_task_completed))
         self.scheduler, self.workflows = register_automation_tools(
             self.registry,
@@ -130,6 +134,8 @@ class VoiceAssistant:
         if self._running.is_set():
             return
         self._running.set()
+        self._cancellation_token.clear()
+        self._processing.clear()
         self._set_state(AssistantState.IDLE, "Starting Friday V3.1...")
 
         # Start continuous audio capture stream
@@ -152,11 +158,12 @@ class VoiceAssistant:
 
     def stop(self) -> None:
         self._running.clear()
-        self.cancel()
+        self._cancellation_token.set()
         self.wake_word.stop()
         self.audio_capture.stop()
         self.tts.stop()
         self.proactive.stop()
+        self._processing.clear()
         self._set_state(AssistantState.IDLE, "Friday stopped.")
 
     def cancel(self) -> None:
@@ -167,17 +174,33 @@ class VoiceAssistant:
         self.wake_word.resume()
         self._set_state(AssistantState.LISTENING_FOR_WAKE, f"Ready. Say '{self.config.wake_word_phrase}'.")
 
+    def barge_in(self) -> None:
+        """Instantly interrupt Friday while speaking or generating and transition to listening."""
+        self._cancellation_token.set()
+        self.tts.stop()
+        self._processing.clear()
+        self._set_state(AssistantState.INTERRUPTED, "Interrupted.")
+        self.wake_word.resume()
+
     def capture_voice_once(self) -> None:
         """Trigger one voice listening round (e.g. from UI button) without breaking continuous stream."""
+        self._cancellation_token.clear()
+        if not self._running.is_set():
+            self.start()
         if self._processing.is_set():
-            self.cancel()
+            self.barge_in()
             return
         threading.Thread(target=self._voice_roundtrip, args=(time.perf_counter(),), daemon=True).start()
 
     def submit_text(self, query: str) -> None:
         """Process a text prompt."""
-        if not query.strip() or self._processing.is_set():
+        if not query.strip():
             return
+        self._cancellation_token.clear()
+        if not self._running.is_set():
+            self.start()
+        if self._processing.is_set():
+            self.barge_in()
         threading.Thread(target=self._handle_query, args=(query,), daemon=True).start()
 
     def handle_query(self, query: str) -> str:
@@ -210,17 +233,17 @@ class VoiceAssistant:
             return
 
         # Barge-in: If assistant is speaking or processing, immediately interrupt and switch to new command
-        if self._processing.is_set() or self._state == AssistantState.SPEAKING:
+        if self._processing.is_set() or self._state in (AssistantState.SPEAKING, AssistantState.THINKING, AssistantState.EXECUTING) or self.tts.is_busy():
             self.logger.info("Barge-in wake word detected while busy. Interrupting current turn.")
-            self.cancel()
+            self.barge_in()
 
         threading.Thread(target=self._voice_roundtrip, args=(t_wake,), daemon=True).start()
 
     def _voice_roundtrip(self, t_wake: float) -> None:
+        time.sleep(0.02)
+        self._cancellation_token.clear()
         self._processing.set()
         self.tts.stop()
-        self.wake_word.pause()  # Pause wake-word while active in voice dialogue
-
         self._set_state(AssistantState.WAKE_DETECTED, "Wake word detected!")
         is_first_turn = True
 
@@ -236,10 +259,23 @@ class VoiceAssistant:
                 telemetry.t_listen_start = time.perf_counter()
                 self._set_state(AssistantState.LISTENING_FOR_COMMAND, "Listening for command...")
 
-                telemetry.t_stt_start = time.perf_counter()
-                transcript = self.stt.listen_once(on_status=lambda msg: self._set_state(AssistantState.LISTENING_FOR_COMMAND, msg))
-                telemetry.t_speech_end = time.perf_counter()
-                telemetry.t_stt_complete = time.perf_counter()
+                # Pause wake word during active mic recording to avoid competing for frames
+                self.wake_word.pause()
+                try:
+                    transcript = self.stt.listen_once(
+                        on_status=lambda msg: self._set_state(
+                            AssistantState.LISTENING_FOR_COMMAND if "Listening" in msg or "Hearing" in msg else AssistantState.TRANSCRIBING,
+                            msg,
+                        )
+                    )
+                finally:
+                    # Resume wake detector so user can barge-in during generation and speech!
+                    self.wake_word.resume()
+                stt_meta = getattr(self.stt, "_last_telemetry", {})
+                telemetry.t_speech_start = stt_meta.get("t_speech_start", turn_start)
+                telemetry.t_speech_end = stt_meta.get("t_speech_end", time.perf_counter())
+                telemetry.t_stt_start = stt_meta.get("t_stt_start", time.perf_counter())
+                telemetry.t_stt_complete = stt_meta.get("t_stt_complete", time.perf_counter())
 
                 # If no speech was detected during the follow-up window (silence / timeout), smoothly return to wake listening
                 if not transcript or not transcript.strip():
@@ -253,21 +289,23 @@ class VoiceAssistant:
                 if cleaned in {
                     "stop", "cancel", "stop listening", "go to sleep", "sleep",
                     "goodbye", "bye", "bye friday", "goodbye friday", "that's all",
-                    "thats all", "thank you that's all", "thank you thats all", "dismiss", "exit", "quit"
+                    "thats all", "thank you that's all", "thank you thats all", "dismiss",
+                    "exit", "quit", "ruko", "band karo", "so jao", "alvida", "bas"
                 }:
-                    farewell = "Going to standby. Say Hey Jarvis when you need me."
+                    is_h = HinglishNormalizer.detect_language(transcript) != UserLanguage.ENGLISH
+                    farewell = "Theek hai, main standby pe ja raha hoon. Jab bhi zaroorat ho, Hey Jarvis bol dena." if is_h else "Going to standby. Say Hey Jarvis when you need me."
                     self._emit_transcript(transcript)
                     self._emit_response(farewell)
                     self._set_state(AssistantState.SPEAKING, farewell)
                     if self.config.speak_responses:
-                        self.tts.speak(farewell)
+                        self.tts.speak(HinglishNormalizer.normalize_for_tts(farewell))
                         self.tts.wait_until_done()
                     break
 
                 response = self._handle_query_sync(transcript, telemetry=telemetry)
 
                 # If the intent indicated shutting down assistant
-                if "Shutting down" in response or "Have a wonderful day" in response:
+                if "Shutting down" in response or "Have a wonderful day" in response or "Alvida" in response:
                     break
 
                 # If continuous follow-up is disabled in config, break after single turn
@@ -307,7 +345,7 @@ class VoiceAssistant:
         self._emit_transcript(query)
         self._set_state(AssistantState.THINKING, "Processing...")
 
-        # 1. Fast-Path Intent Router (<50ms deterministic execution)
+        # 1. Fast-Path Intent Router (<50ms deterministic execution with Hinglish normalization)
         t.t_router_start = time.perf_counter()
         intent = self.router.route(query)
         t.t_router_complete = time.perf_counter()
@@ -322,7 +360,8 @@ class VoiceAssistant:
 
             if self.config.speak_responses and not self._cancellation_token.is_set():
                 t.t_tts_start = time.perf_counter()
-                self.tts.speak(response)
+                tts_text = HinglishNormalizer.normalize_for_tts(response)
+                self.tts.speak(tts_text)
                 t.t_tts_first_audio = time.perf_counter()
                 self.tts.wait_until_done()
                 t.t_playback_complete = time.perf_counter()
@@ -339,10 +378,21 @@ class VoiceAssistant:
         self._emit_response("")
         self._set_state(AssistantState.SPEAKING, "Thinking and speaking...")
 
+        # Build active context from focused window and memory
+        active_window = ""
+        try:
+            import win32gui
+            hwnd = win32gui.GetForegroundWindow()
+            if hwnd:
+                active_window = win32gui.GetWindowText(hwnd)
+        except Exception:
+            pass
+        sys_context = self.context_builder.build_system_context(query, active_window_title=active_window)
+
         t.t_llm_start = time.perf_counter()
         first_token = True
 
-        for sentence, accumulated in self.llm.stream_sentences(query, history=self._history):
+        for sentence, accumulated in self.llm.stream_sentences(query, history=self._history, system_context=sys_context):
             if self._cancellation_token.is_set():
                 self.logger.info("LLM token streaming cancelled.")
                 break
@@ -357,15 +407,17 @@ class VoiceAssistant:
             if self.config.speak_responses and not self._cancellation_token.is_set():
                 if t.t_tts_first_audio == 0.0:
                     t.t_tts_first_audio = time.perf_counter()
-                self.tts.speak_sentence(sentence)
+                tts_chunk = HinglishNormalizer.normalize_for_tts(sentence)
+                self.tts.speak_sentence(tts_chunk)
 
         t.t_llm_complete = time.perf_counter()
 
         if not full_response_text.strip() and not self._cancellation_token.is_set():
-            full_response_text = "I'm sorry, I could not generate a response from the local model."
+            is_h = HinglishNormalizer.detect_language(query) != UserLanguage.ENGLISH
+            full_response_text = "Maaf karna, local AI model se response generate nahi ho paya." if is_h else "I'm sorry, I could not generate a response from the local model."
             self._emit_response(full_response_text)
             if self.config.speak_responses:
-                self.tts.speak(full_response_text)
+                self.tts.speak(HinglishNormalizer.normalize_for_tts(full_response_text))
 
         if self.config.speak_responses and not self._cancellation_token.is_set():
             self.tts.wait_until_done()
@@ -408,18 +460,21 @@ class VoiceAssistant:
             val = state.value if isinstance(state, AssistantState) else str(state)
             self.on_state(val)
             self.on_status(status_msg)
+            global_event_bus.publish("assistant.state_change", {"state": val, "status": status_msg})
         except Exception:
             pass
 
     def _emit_transcript(self, text: str) -> None:
         try:
             self.on_transcript(text)
+            global_event_bus.publish("stt.transcript", {"transcript": text})
         except Exception:
             pass
 
     def _emit_response(self, text: str) -> None:
         try:
             self.on_response(text)
+            global_event_bus.publish("assistant.response", {"response": text})
         except Exception:
             pass
 

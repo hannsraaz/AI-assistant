@@ -83,6 +83,23 @@ class TaskRecord:
     def emit_event(self, event: TaskEvent, message: str) -> None:
         entry = f"[{time.strftime('%H:%M:%S')}] [{event.value}] {message}"
         self.logs.append(entry)
+        try:
+            from core.event_bus import global_event_bus
+            global_event_bus.publish(
+                "task.event",
+                {
+                    "task_id": self.task_id,
+                    "title": self.title,
+                    "event": event.value if hasattr(event, "value") else str(event),
+                    "message": message,
+                    "status": self.status.value if hasattr(self.status, "value") else str(self.status),
+                    "current_step": self.current_step,
+                    "total_steps": len(self.steps),
+                },
+            )
+        except Exception:
+            pass
+
         if self.on_event:
             try:
                 self.on_event(event, message)

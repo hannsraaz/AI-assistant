@@ -44,6 +44,11 @@ class TerminalExecuteTool(BaseTool):
         r"\bsudo\b",
         r"\breg\s+delete\b",
         r"\bpowershell\s+.*-enc\b",
+        r"\bvssadmin\b",
+        r"\bbcdedit\b",
+        r"\bwbadmin\b",
+        r"\bcertutil\s+.*-urlcache\b",
+        r"\bnet\s+user\s+.*\/add\b",
     )
 
     def execute(self, command: str, cwd: str = "", timeout: int = 30, **kwargs: Any) -> ToolResult:

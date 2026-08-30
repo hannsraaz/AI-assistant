@@ -32,3 +32,14 @@ def test_apps_find_tool(registry: ToolRegistry) -> None:
     res = registry.execute("apps.find", query="notepad")
     assert res.success is True
     assert "path" in res.data
+
+
+def test_apps_open_tool(registry: ToolRegistry) -> None:
+    # Test standard execution with app_name
+    res = registry.execute("apps.open", app_name="calc")
+    assert res.success is True
+
+    # Test alias execution with target
+    res_alias = registry.execute("apps.open", target="calc")
+    assert res_alias.success is True
+

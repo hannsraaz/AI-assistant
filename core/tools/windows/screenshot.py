@@ -79,10 +79,8 @@ class ScreenshotTakeTool(BaseTool):
 
             # 3. Fullscreen (mss preferred, ImageGrab fallback)
             try:
-                import mss
-                import mss.tools
-
-                with mss.mss() as sct:
+                mss_factory = getattr(mss, "MSS", getattr(mss, "mss", None))
+                with mss_factory() as sct:
                     monitor = sct.monitors[0]
                     sct_img = sct.grab(monitor)
                     mss.tools.to_png(sct_img.rgb, sct_img.size, output=str(target_path))

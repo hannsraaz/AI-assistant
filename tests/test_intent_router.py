@@ -37,6 +37,16 @@ class TestIntentRouter:
         assert res.handled is True
         assert "Timer set" in res.response
 
+    def test_open_app_matching(self, intent_router: IntentRouter) -> None:
+        res = intent_router.route("open notepad")
+        assert res.handled is True
+        assert "notepad" in res.response.lower() or "opening" in res.response.lower() or "launching" in res.response.lower()
+
+    def test_open_app_hinglish(self, intent_router: IntentRouter) -> None:
+        res = intent_router.route("chrome kholo")
+        assert res.handled is True
+        assert "chrome" in res.response.lower()
+
     def test_unhandled_routes_to_llm(self, intent_router: IntentRouter) -> None:
         res = intent_router.route("Explain the theory of relativity")
         assert res.handled is False

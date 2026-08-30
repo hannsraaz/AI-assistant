@@ -88,14 +88,23 @@ class OllamaClient:
         except Exception:
             return False
 
-    def stream_chat(self, prompt: str, history: Iterable[dict[str, str]] | None = None) -> Iterator[str]:
+    def stream_chat(
+        self,
+        prompt: str,
+        history: Iterable[dict[str, str]] | None = None,
+        system_context: str = "",
+    ) -> Iterator[str]:
         # If not connected yet, try auto-starting Ollama on first query
         if not self._ensure_daemon_checked:
             self._ensure_daemon_checked = True
             if not self.check_connection():
                 self.ensure_ollama_running()
 
-        messages: list[dict[str, str]] = [{"role": "system", "content": self.config.system_prompt}]
+        system_msg = self.config.system_prompt
+        if system_context.strip():
+            system_msg += f"\n\n{system_context.strip()}"
+
+        messages: list[dict[str, str]] = [{"role": "system", "content": system_msg}]
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": prompt})
@@ -171,12 +180,17 @@ class OllamaClient:
             "or start Ollama with 'ollama run llama3.2:3b' to chat freely."
         )
 
-    def stream_sentences(self, prompt: str, history: Iterable[dict[str, str]] | None = None) -> Iterator[tuple[str, str]]:
+    def stream_sentences(
+        self,
+        prompt: str,
+        history: Iterable[dict[str, str]] | None = None,
+        system_context: str = "",
+    ) -> Iterator[tuple[str, str]]:
         buffer = ""
         full_text = ""
         sentence_end = re.compile(r"([.?!;:\n]+)")
 
-        for token in self.stream_chat(prompt, history=history):
+        for token in self.stream_chat(prompt, history=history, system_context=system_context):
             buffer += token
             full_text += token
 
@@ -191,3 +205,4 @@ class OllamaClient:
 
         if buffer.strip():
             yield buffer.strip(), full_text
+

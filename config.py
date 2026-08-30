@@ -63,6 +63,20 @@ class STTConfig:
 
 
 @dataclass(slots=True)
+class VADConfig:
+    enabled: bool = True
+    model_path: str = "data/openwakeword_models/silero_vad.onnx"
+    speech_threshold: float = 0.45
+    min_speech_duration_ms: int = 120
+    silence_duration_ms: int = 450
+    min_record_seconds: float = 0.5
+    max_record_seconds: float = 12.0
+    pre_roll_seconds: float = 0.35
+    sample_rate: int = 16_000
+
+
+
+@dataclass(slots=True)
 class LLMConfig:
     base_url: str = "http://127.0.0.1:11434"
     model: str = "llama3.2:3b"  # Fast 3B model (or qwen2.5:3b / mistral)
@@ -70,15 +84,22 @@ class LLMConfig:
     keep_alive: str = "30m"
     request_timeout: int = 60
     system_prompt: str = (
-        "You are Friday, a lightning-fast Bixby/Jarvis-style local desktop assistant. "
-        "Keep your spoken answers concise, direct, natural, and helpful (1-2 sentences usually). "
-        "When performing actions or answering questions, be crisp and avoid markdown bullet lists unless asked."
+        "You are Friday, a lightning-fast Jarvis-style local Windows personal assistant. "
+        "Language policy: Match the user's language naturally. If the user speaks Hinglish or Hindi, respond in natural, friendly Roman Hinglish (e.g. 'Haan, main check karta hoon', 'VS Code khol raha hoon'). "
+        "If the user speaks English, respond in English. "
+        "Never translate technical terms (keep VS Code, Android Studio, Git, build, commit, push, RAM, CPU, GPU, browser, download, file, folder, screenshot, terminal, project in English). "
+        "Keep spoken answers concise, confident, and crisp (1-2 sentences usually)."
     )
 
 
 @dataclass(slots=True)
 class TTSConfig:
-    backend: str = "piper"  # 'piper' or 'pyttsx3'
+    backend: str = "auto"  # 'auto', 'piper', 'hinglish', 'indicvoice', 'pyttsx3'
+    engine: str = "auto"   # Alias for pluggable TTSEngine selection
+    language: str = "auto" # 'auto', 'hinglish', 'hi', 'en'
+    hinglish_enabled: bool = True
+    hindi_enabled: bool = True
+    fallback_enabled: bool = True
     voice_name: str = ""
     rate: int = 195
     volume: float = 1.0
@@ -148,6 +169,7 @@ class AppConfig:
     log_file: str = "data/friday.log"
     wake_word: WakeWordConfig = field(default_factory=WakeWordConfig)
     stt: STTConfig = field(default_factory=STTConfig)
+    vad: VADConfig = field(default_factory=VADConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     tts: TTSConfig = field(default_factory=TTSConfig)
     desktop: DesktopConfig = field(default_factory=DesktopConfig)
@@ -200,6 +222,7 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
 
     wake_word = WakeWordConfig(**_filter_known_fields(WakeWordConfig, merged.get("wake_word", {})))
     stt = STTConfig(**_filter_known_fields(STTConfig, merged.get("stt", {})))
+    vad = VADConfig(**_filter_known_fields(VADConfig, merged.get("vad", {})))
     llm = LLMConfig(**_filter_known_fields(LLMConfig, merged.get("llm", {})))
     tts = TTSConfig(**_filter_known_fields(TTSConfig, merged.get("tts", {})))
     desktop = DesktopConfig(**_filter_known_fields(DesktopConfig, merged.get("desktop", {})))
@@ -208,6 +231,7 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
     top_level = _filter_known_fields(AppConfig, merged)
     top_level["wake_word"] = wake_word
     top_level["stt"] = stt
+    top_level["vad"] = vad
     top_level["llm"] = llm
     top_level["tts"] = tts
     top_level["desktop"] = desktop

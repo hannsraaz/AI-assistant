@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import collections
 import logging
+import queue
 import threading
 import time
 from collections.abc import Callable
@@ -32,7 +32,7 @@ class AudioRingBuffer:
 
         with self._lock:
             if chunk_len >= self.capacity_samples:
-                self._buffer[:] = chunk_flat[-self.capacity_samples:]
+                self._buffer[:] = chunk_flat[-self.capacity_samples :]
                 self._write_pos = 0
             else:
                 end_pos = self._write_pos + chunk_len
@@ -64,12 +64,15 @@ class AudioRingBuffer:
 
 
 class ContinuousAudioCapture:
-    """Single persistent microphone listener continuously feeding ring buffer and subscribers."""
+    """Persistent, ultra-low latency microphone listener with decoupled subscriber queues,
+
+    ring-buffer history, and auto-reconnect resilience.
+    """
 
     def __init__(
         self,
         sample_rate: int = 16000,
-        frame_length: int = 1280,
+        frame_length: int = 512,  # 32ms low-latency base block size
         device_index: int = -1,
         on_error: Callable[[str], None] | None = None,
     ) -> None:
@@ -79,17 +82,30 @@ class ContinuousAudioCapture:
         self.on_error = on_error or (lambda _: None)
 
         self.ring_buffer = AudioRingBuffer(capacity_seconds=5.0, sample_rate=sample_rate)
+
+        # Thread-safe decoupled subscribers
         self._subscribers: list[Callable[[np.ndarray, np.ndarray], None]] = []
+        self._queue_subscribers: list[queue.Queue[tuple[np.ndarray, np.ndarray]]] = []
         self._sub_lock = threading.Lock()
 
+        # Dedicated async dispatch thread to ensure sounddevice loop never blocks
+        self._dispatch_queue: queue.Queue[tuple[np.ndarray, np.ndarray]] = queue.Queue(maxsize=100)
+        self._dispatch_thread: threading.Thread | None = None
+
         self._running = threading.Event()
-        self._stream = None
+        self._stream: Any = None
         self._thread: threading.Thread | None = None
         self._last_frame_time = 0.0
+
+        # Health and telemetry metrics
         self.is_connected = False
+        self.current_rms_level = 0.0
+        self.overflow_count = 0
+        self.dropped_dispatch_frames = 0
+        self.total_frames_captured = 0
 
     def add_subscriber(self, callback: Callable[[np.ndarray, np.ndarray], None]) -> None:
-        """Subscribe to raw audio frames: callback(pcm_float32, pcm_int16)."""
+        """Subscribe a callback to raw audio frames: callback(pcm_float32, pcm_int16)."""
         with self._sub_lock:
             if callback not in self._subscribers:
                 self._subscribers.append(callback)
@@ -99,17 +115,40 @@ class ContinuousAudioCapture:
             if callback in self._subscribers:
                 self._subscribers.remove(callback)
 
+    def create_queue_subscriber(self, maxsize: int = 100) -> queue.Queue[tuple[np.ndarray, np.ndarray]]:
+        """Create a dedicated FIFO queue for streaming consumer threads."""
+        q: queue.Queue[tuple[np.ndarray, np.ndarray]] = queue.Queue(maxsize=maxsize)
+        with self._sub_lock:
+            self._queue_subscribers.append(q)
+        return q
+
+    def remove_queue_subscriber(self, q: queue.Queue[tuple[np.ndarray, np.ndarray]]) -> None:
+        with self._sub_lock:
+            if q in self._queue_subscribers:
+                self._queue_subscribers.remove(q)
+
     def start(self) -> None:
         if self._running.is_set():
             return
         self._running.set()
-        self._thread = threading.Thread(target=self._capture_loop, daemon=True)
-        self._thread.start()
+
+        # Start dispatch worker if not alive
+        if self._dispatch_thread is None or not self._dispatch_thread.is_alive():
+            self._dispatch_thread = threading.Thread(target=self._dispatch_loop, daemon=True)
+            self._dispatch_thread.start()
+
+        # Start microphone capture thread if not alive
+        if self._thread is None or not self._thread.is_alive():
+            self._thread = threading.Thread(target=self._capture_loop, daemon=True)
+            self._thread.start()
 
     def stop(self) -> None:
         self._running.clear()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.5)
+        if self._dispatch_thread and self._dispatch_thread.is_alive():
+            self._dispatch_thread.join(timeout=1.0)
+        self.is_connected = False
 
     def _capture_loop(self) -> None:
         import sounddevice as sd
@@ -126,33 +165,69 @@ class ContinuousAudioCapture:
                 ) as stream:
                     self._stream = stream
                     self.is_connected = True
-                    logger.info("Continuous audio stream established on device %s", self.device_index)
+                    logger.info("Continuous audio stream established on device index %s", self.device_index)
 
                     while self._running.is_set():
                         chunk, overflowed = stream.read(self.frame_length)
+                        if overflowed:
+                            self.overflow_count += 1
+                            logger.debug("Microphone buffer overflowed (count: %d)", self.overflow_count)
+
                         self._last_frame_time = time.monotonic()
                         float_chunk = np.squeeze(chunk).astype(np.float32)
+                        self.total_frames_captured += 1
 
-                        # Write to ring buffer
+                        # Compute real-time RMS input level
+                        if len(float_chunk) > 0:
+                            self.current_rms_level = float(np.sqrt(np.mean(np.square(float_chunk))))
+
+                        # Write to continuous ring buffer
                         self.ring_buffer.write(float_chunk)
 
-                        # Prepare int16 for wake-word models
+                        # Prepare int16 format
                         int16_chunk = np.clip(float_chunk * 32767.0, -32768, 32767).astype(np.int16)
 
-                        # Dispatch to subscribers
-                        with self._sub_lock:
-                            subs = list(self._subscribers)
-                        for sub in subs:
-                            try:
-                                sub(float_chunk, int16_chunk)
-                            except Exception as exc:
-                                logger.warning("Subscriber callback error: %s", exc)
+                        # Non-blocking enqueue to dispatch worker
+                        try:
+                            self._dispatch_queue.put_nowait((float_chunk, int16_chunk))
+                        except queue.Full:
+                            self.dropped_dispatch_frames += 1
 
             except Exception as exc:
                 self.is_connected = False
-                logger.warning("Microphone stream error: %s. Attempting reconnection in 2s...", exc)
+                logger.warning("Microphone stream error: %s. Attempting reconnection in 1.5s...", exc)
                 self.on_error(f"Microphone error: {exc}")
-                time.sleep(2.0)
+                time.sleep(1.5)
+
+    def _dispatch_loop(self) -> None:
+        """Dedicated worker thread dispatching audio to callbacks and subscriber queues."""
+        while self._running.is_set():
+            try:
+                float_chunk, int16_chunk = self._dispatch_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+
+            with self._sub_lock:
+                callbacks = list(self._subscribers)
+                queues = list(self._queue_subscribers)
+
+            # Dispatch to callback subscribers
+            for cb in callbacks:
+                try:
+                    cb(float_chunk, int16_chunk)
+                except Exception as exc:
+                    logger.warning("Subscriber callback exception: %s", exc)
+
+            # Dispatch to queue subscribers
+            for q in queues:
+                try:
+                    q.put_nowait((float_chunk, int16_chunk))
+                except queue.Full:
+                    try:
+                        q.get_nowait()  # Drop oldest frame to maintain real-time freshness
+                        q.put_nowait((float_chunk, int16_chunk))
+                    except Exception:
+                        pass
 
 
 # Global singleton continuous capture

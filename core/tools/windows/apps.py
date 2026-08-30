@@ -208,18 +208,19 @@ class AppsFindTool(BaseTool):
         "required": ["query"],
     }
 
-    def execute(self, query: str, **kwargs: Any) -> ToolResult:
-        path = AppDiscovery.find_app_path(query)
+    def execute(self, query: str = "", **kwargs: Any) -> ToolResult:
+        search_query = (query or kwargs.get("app_name") or kwargs.get("target") or kwargs.get("name") or kwargs.get("q") or "").strip()
+        path = AppDiscovery.find_app_path(search_query)
         if path:
             return ToolResult(
                 success=True,
-                message=f"Found application path for '{query}'.",
-                data={"query": query, "path": path},
+                message=f"Found application path for '{search_query}'.",
+                data={"query": search_query, "path": path},
             )
         return ToolResult(
             success=False,
-            error=f"Could not locate application '{query}'.",
-            data={"query": query},
+            error=f"Could not locate application '{search_query}'.",
+            data={"query": search_query},
         )
 
 
@@ -235,8 +236,15 @@ class AppsOpenTool(BaseTool):
         "required": ["app_name"],
     }
 
-    def execute(self, app_name: str, **kwargs: Any) -> ToolResult:
-        target = app_name.strip()
+    def execute(self, app_name: str = "", **kwargs: Any) -> ToolResult:
+        target = (app_name or kwargs.get("target") or kwargs.get("name") or kwargs.get("app") or kwargs.get("path") or "").strip()
+        if not target:
+            return ToolResult(
+                success=False,
+                error="Application name or target must not be empty.",
+                data={"target": target},
+            )
+
         path = AppDiscovery.find_app_path(target)
 
         # 1. Try matched path or URI
@@ -296,14 +304,15 @@ class AppsCloseTool(BaseTool):
         "required": ["app_name"],
     }
 
-    def execute(self, app_name: str, **kwargs: Any) -> ToolResult:
-        clean = app_name.strip().lower().replace(".exe", "")
+    def execute(self, app_name: str = "", **kwargs: Any) -> ToolResult:
+        target = (app_name or kwargs.get("name") or kwargs.get("target") or kwargs.get("app") or "").strip()
+        clean = target.lower().replace(".exe", "")
         closed_pids = []
 
         for proc in psutil.process_iter(["pid", "name"]):
             try:
                 pname = (proc.info["name"] or "").lower()
-                if clean in pname or pname.startswith(clean):
+                if clean and (clean in pname or pname.startswith(clean)):
                     proc.terminate()
                     closed_pids.append(proc.info["pid"])
             except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -312,14 +321,14 @@ class AppsCloseTool(BaseTool):
         if closed_pids:
             return ToolResult(
                 success=True,
-                message=f"Closed {app_name} ({len(closed_pids)} process instances terminated).",
-                data={"app_name": app_name, "pids": closed_pids},
+                message=f"Closed {target} ({len(closed_pids)} process instances terminated).",
+                data={"app_name": target, "pids": closed_pids},
             )
 
         return ToolResult(
             success=False,
-            error=f"No running processes found for '{app_name}'.",
-            data={"app_name": app_name},
+            error=f"No running processes found for '{target}'.",
+            data={"app_name": target},
         )
 
 
@@ -335,19 +344,20 @@ class AppsFocusTool(BaseTool):
         "required": ["app_name"],
     }
 
-    def execute(self, app_name: str, **kwargs: Any) -> ToolResult:
+    def execute(self, app_name: str = "", **kwargs: Any) -> ToolResult:
+        target = (app_name or kwargs.get("name") or kwargs.get("target") or kwargs.get("app") or "").strip()
         try:
             import win32gui
             import win32con
 
-            clean = app_name.strip().lower()
+            clean = target.lower()
             matched_hwnd = None
 
             def enum_window_callback(hwnd: int, extra: Any) -> bool:
                 nonlocal matched_hwnd
                 if win32gui.IsWindowVisible(hwnd):
                     title = win32gui.GetWindowText(hwnd).lower()
-                    if clean in title and title:
+                    if clean and clean in title and title:
                         matched_hwnd = hwnd
                         return False
                 return True
@@ -364,18 +374,18 @@ class AppsFocusTool(BaseTool):
                 win32gui.SetForegroundWindow(matched_hwnd)
                 return ToolResult(
                     success=True,
-                    message=f"Brought {app_name} to the front.",
-                    data={"app_name": app_name, "hwnd": matched_hwnd},
+                    message=f"Brought {target} to the front.",
+                    data={"app_name": target, "hwnd": matched_hwnd},
                 )
         except Exception as exc:
             return ToolResult(
                 success=False,
-                error=f"Failed to focus '{app_name}': {exc}",
-                data={"app_name": app_name},
+                error=f"Failed to focus '{target}': {exc}",
+                data={"app_name": target},
             )
 
         return ToolResult(
             success=False,
-            error=f"Window for '{app_name}' not found.",
-            data={"app_name": app_name},
+            error=f"Window for '{target}' not found.",
+            data={"app_name": target},
         )

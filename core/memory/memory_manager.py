@@ -140,6 +140,22 @@ class MemoryManager:
     def list_all(self) -> list[dict[str, Any]]:
         return [e.to_dict() for e in self._entries.values()]
 
+    def list_memories(self, category: str = "all", limit: int = 100) -> list[dict[str, Any]]:
+        entries = self.list_all()
+        if category and category != "all":
+            entries = [e for e in entries if e.get("type", "").lower() == category.lower() or e.get("category", "").lower() == category.lower()]
+        return entries[:limit]
+
+    def delete_memory(self, memory_id_or_key: str) -> bool:
+        if self.forget(memory_id_or_key):
+            return True
+        for key, entry in list(self._entries.items()):
+            if entry.memory_id == memory_id_or_key:
+                del self._entries[key]
+                self._save()
+                return True
+        return False
+
 
 # --- Memory 2.0 Tools ---
 

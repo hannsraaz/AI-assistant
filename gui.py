@@ -1,14 +1,26 @@
 from __future__ import annotations
 
 import math
-import sys
 import threading
 import time
 import tkinter as tk
 from tkinter import ttk
 from typing import TYPE_CHECKING, Any
 
+from core.event_bus import Event, global_event_bus
 from core.telemetry import global_telemetry
+from ui.components.confirmation_dialog import ConfirmationDialog
+from ui.theme import UITheme
+from ui.views.automation import AutomationView
+from ui.views.conversation import ConversationView
+from ui.views.developer import DeveloperView
+from ui.views.home import HomeView
+from ui.views.memory import MemoryView
+from ui.views.settings import SettingsView
+from ui.views.system_hud import SystemHudView
+from ui.views.tasks import TasksView
+from ui.views.tools import ToolsView
+from ui.views.vision import VisionView
 
 if TYPE_CHECKING:
     from assistant_core import VoiceAssistant
@@ -16,246 +28,224 @@ if TYPE_CHECKING:
 
 
 class AssistantWindow:
-    """Modern glowing dark-mode HUD & Control Center for Friday V3.1 with Developer Diagnostics."""
+    """Futuristic Personal AI Command Center, HUD & Autonomous Desktop OS for FRIDAY V4."""
 
     def __init__(self, assistant: VoiceAssistant, config: AppConfig) -> None:
         self.assistant = assistant
         self.config = config
 
         self.root = tk.Tk()
-        self.root.title(f"{config.name} V3.1 — Voice Assistant")
-        self.root.geometry("500x700")
-        self.root.minsize(460, 600)
-        self.root.configure(bg="#0d1117")
+        self.root.title(f"{config.name} V4 — Futuristic AI Command Center")
+        self.root.geometry("680x760")
+        self.root.minsize(580, 640)
+        self.root.configure(bg=UITheme.BG_DARK)
 
-        if config.ui.always_on_top:
+        if getattr(config.ui, "always_on_top", True):
             self.root.attributes("-topmost", True)
 
-        self._state = "idle"  # listening_for_wake, wake_detected, listening_for_command, transcribing, thinking, executing, speaking, error
-        self._anim_phase = 0.0
+        self._state = "idle"
         self._after_id: str | None = None
-        self._show_diag = tk.BooleanVar(value=True)
+        self._is_compact = False
+        self._saved_geometry = "680x760"
 
-        # Hook task events to GUI
+        # Initialize Views Container
+        self.views: dict[str, tk.Frame] = {}
+        self.current_view_name = "home"
+
+        # Wire task events and Event Bus
         self.assistant.task_manager.on_task_event = self._on_task_event
+        self._subscribe_event_bus()
 
         self._build_ui()
-        self._start_animation()
-        self._start_telemetry_polling()
+        self._start_animation_loop()
+        self._start_metrics_worker()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    def _subscribe_event_bus(self) -> None:
+        def _on_bus_event(evt: Event) -> None:
+            if evt.topic == "assistant.state_change":
+                state = evt.payload.get("state", "idle")
+                status = evt.payload.get("status", "")
+                self.set_state(state, status)
+            elif evt.topic == "stt.transcript":
+                self.set_transcript(evt.payload.get("transcript", ""))
+            elif evt.topic == "assistant.response":
+                self.set_response(evt.payload.get("response", ""))
+
+        global_event_bus.subscribe("*", _on_bus_event)
+
     def _build_ui(self) -> None:
-        # 1. Header Bar
-        header = tk.Frame(self.root, bg="#0d1117", pady=8)
-        header.pack(fill="x", padx=16)
+        # 1. Top Title & Quick Telemetry HUD Bar
+        self.top_bar = tk.Frame(self.root, bg=UITheme.BG_SURFACE, padx=14, pady=6)
+        self.top_bar.pack(fill="x")
 
-        title_lbl = tk.Label(
-            header,
-            text=f"{self.config.name.upper()} V3.1",
-            font=("Segoe UI", 15, "bold"),
-            fg="#00d2ff",
-            bg="#0d1117",
-        )
-        title_lbl.pack(side="left")
+        # Brand / Title
+        brand_frame = tk.Frame(self.top_bar, bg=UITheme.BG_SURFACE)
+        brand_frame.pack(side="left")
 
+        tk.Label(
+            brand_frame,
+            text=f"◈ {self.config.name.upper()} V4",
+            font=UITheme.FONT_TITLE,
+            fg=UITheme.CYAN,
+            bg=UITheme.BG_SURFACE,
+        ).pack(side="left")
+
+        # Live State Badge
         self.state_badge = tk.Label(
-            header,
-            text="WAKE READY",
-            font=("Segoe UI", 9, "bold"),
-            fg="#00ffa3",
-            bg="#161b22",
+            self.top_bar,
+            text="● READY",
+            font=UITheme.FONT_CAPTION_BOLD,
+            fg=UITheme.EMERALD,
+            bg=UITheme.BG_CARD,
             padx=8,
-            pady=2,
+            pady=3,
         )
-        self.state_badge.pack(side="right")
+        self.state_badge.pack(side="left", padx=12)
 
-        # 2. Animated Voice Orb Canvas
-        self.canvas = tk.Canvas(
-            self.root,
-            width=100,
-            height=100,
-            bg="#0d1117",
-            highlightthickness=0,
-        )
-        self.canvas.pack(pady=2)
-        self.canvas.bind("<Button-1>", lambda _: self._on_orb_click())
+        # Quick System Hardware Badges
+        stats_frame = tk.Frame(self.top_bar, bg=UITheme.BG_SURFACE)
+        stats_frame.pack(side="right")
 
-        # 3. Status Label
-        self.status_lbl = tk.Label(
-            self.root,
-            text=f"Say '{self.config.wake_word_phrase}' or click orb",
-            font=("Segoe UI", 9),
-            fg="#8b949e",
-            bg="#0d1117",
-            wraplength=440,
-        )
-        self.status_lbl.pack(pady=2)
+        self.quick_cpu_lbl = tk.Label(stats_frame, text="CPU: --%", font=UITheme.FONT_MONO, fg=UITheme.TEXT_SECONDARY, bg=UITheme.BG_SURFACE)
+        self.quick_cpu_lbl.pack(side="left", padx=4)
 
-        # 4. Live Task & Progress Frame
-        self.task_frame = tk.Frame(self.root, bg="#161b22", padx=10, pady=6)
-        self.task_frame.pack(fill="x", padx=16, pady=4)
+        self.quick_ram_lbl = tk.Label(stats_frame, text="RAM: --%", font=UITheme.FONT_MONO, fg=UITheme.TEXT_SECONDARY, bg=UITheme.BG_SURFACE)
+        self.quick_ram_lbl.pack(side="left", padx=4)
 
-        self.task_title_lbl = tk.Label(
-            self.task_frame,
-            text="Active Task: None",
-            font=("Segoe UI", 9, "bold"),
-            fg="#79c0ff",
-            bg="#161b22",
-            anchor="w",
-        )
-        self.task_title_lbl.pack(fill="x")
-
-        self.progress_bar = ttk.Progressbar(self.task_frame, mode="determinate", maximum=100, value=0)
-        self.progress_bar.pack(fill="x", pady=3)
-
-        self.task_step_lbl = tk.Label(
-            self.task_frame,
-            text="Ready for voice or text instruction.",
-            font=("Segoe UI", 8),
-            fg="#8b949e",
-            bg="#161b22",
-            anchor="w",
-        )
-        self.task_step_lbl.pack(fill="x")
-
-        # 5. Chat & Response Container
-        chat_frame = tk.Frame(self.root, bg="#161b22", bd=0, padx=10, pady=6)
-        chat_frame.pack(fill="both", expand=True, padx=16, pady=4)
-
-        self.user_lbl = tk.Label(
-            chat_frame,
-            text="You: ...",
-            font=("Segoe UI", 9, "italic"),
-            fg="#79c0ff",
-            bg="#161b22",
-            anchor="w",
-            wraplength=440,
-        )
-        self.user_lbl.pack(fill="x", pady=(0, 2))
-
-        self.resp_box = tk.Text(
-            chat_frame,
-            font=("Segoe UI", 10),
-            fg="#f0f6fc",
-            bg="#161b22",
+        self.compact_btn = tk.Button(
+            stats_frame,
+            text="🗕 Pill",
+            font=UITheme.FONT_CAPTION_BOLD,
+            fg=UITheme.TEXT_PRIMARY,
+            bg=UITheme.BG_CARD,
+            activebackground=UITheme.BG_CARD_HOVER,
             bd=0,
-            wrap="word",
-            height=4,
-            highlightthickness=0,
+            padx=6,
+            pady=2,
+            cursor="hand2",
+            command=self._toggle_compact_mode,
         )
-        self.resp_box.pack(fill="both", expand=True)
-        self.resp_box.insert("1.0", "Friday V3.1 is listening.")
-        self.resp_box.config(state="disabled")
+        self.compact_btn.pack(side="left", padx=(8, 0))
 
-        # 6. Developer Diagnostics Panel (Phase 16)
-        self.diag_frame = tk.LabelFrame(
-            self.root,
-            text="⚙️ Latency & Audio Health Diagnostics",
-            font=("Segoe UI", 8, "bold"),
-            fg="#8b949e",
-            bg="#0d1117",
-            padx=8,
-            pady=4,
-        )
-        self.diag_frame.pack(fill="x", padx=16, pady=2)
+        # 2. Futuristic Horizontal Navigation Deck
+        self.nav_frame = tk.Frame(self.root, bg=UITheme.BG_DARK, pady=4, padx=8)
+        self.nav_frame.pack(fill="x")
 
-        health_row = tk.Frame(self.diag_frame, bg="#0d1117")
-        health_row.pack(fill="x")
-
-        self.mic_health_lbl = tk.Label(health_row, text="Mic: ● CONNECTED", font=("Segoe UI", 8, "bold"), fg="#00ffa3", bg="#0d1117")
-        self.mic_health_lbl.pack(side="left", padx=4)
-
-        self.wake_health_lbl = tk.Label(health_row, text="Wake: ● LISTENING", font=("Segoe UI", 8, "bold"), fg="#00d2ff", bg="#0d1117")
-        self.wake_health_lbl.pack(side="left", padx=8)
-
-        self.latency_lbl = tk.Label(
-            self.diag_frame,
-            text="Latency: STT --ms | Router --ms | Tool --ms | TTS --ms | E2E --ms",
-            font=("Segoe UI", 8),
-            fg="#c9d1d9",
-            bg="#0d1117",
-            anchor="w",
-        )
-        self.latency_lbl.pack(fill="x", pady=2)
-
-        # 7. Quick Actions
-        quick_frame = tk.Frame(self.root, bg="#0d1117")
-        quick_frame.pack(fill="x", padx=16, pady=2)
-
-        quick_actions = [
-            ("Mute", lambda: self.assistant.submit_text("toggle mute")),
-            ("Vision", lambda: self.assistant.submit_text("describe what is on my screen")),
-            ("Stats", lambda: self.assistant.submit_text("system status")),
-            ("Cancel / Stop", lambda: self.assistant.cancel()),
+        nav_items = [
+            ("🏠 Home", "home"),
+            ("💬 Chat", "chat"),
+            ("⚡ Tasks", "tasks"),
+            ("📊 System", "system"),
+            ("🧠 Memory", "memory"),
+            ("🔧 Tools", "tools"),
+            ("👁️ Vision", "vision"),
+            ("💻 Dev", "dev"),
+            ("⏰ Auto", "auto"),
+            ("⚙️ Config", "settings"),
         ]
 
-        for text, cmd in quick_actions:
+        self.nav_buttons: dict[str, tk.Button] = {}
+        for label, view_name in nav_items:
             btn = tk.Button(
-                quick_frame,
-                text=text,
-                font=("Segoe UI", 8, "bold"),
-                fg="#c9d1d9" if "Cancel" not in text else "#ff7b72",
-                bg="#21262d",
-                activebackground="#30363d",
-                activeforeground="#ffffff",
+                self.nav_frame,
+                text=label,
+                font=UITheme.FONT_CAPTION_BOLD,
+                fg=UITheme.CYAN if view_name == "home" else UITheme.TEXT_SECONDARY,
+                bg=UITheme.BG_CARD if view_name == "home" else UITheme.BG_DARK,
+                activebackground=UITheme.BG_CARD_HOVER,
+                activeforeground=UITheme.CYAN,
                 bd=0,
                 padx=8,
-                pady=2,
+                pady=4,
                 cursor="hand2",
-                command=cmd,
+                command=lambda vn=view_name: self.switch_view(vn),
             )
-            btn.pack(side="left", padx=2)
+            btn.pack(side="left", padx=1, expand=True, fill="x")
+            self.nav_buttons[view_name] = btn
 
-        # 8. Bottom Input Bar
-        input_frame = tk.Frame(self.root, bg="#0d1117", pady=6)
-        input_frame.pack(fill="x", padx=16)
+        # 3. Central View Deck Container
+        self.view_container = tk.Frame(self.root, bg=UITheme.BG_DARK)
+        self.view_container.pack(fill="both", expand=True)
+
+        # Instantiate View Subcomponents
+        self.views["home"] = HomeView(self.view_container, self.assistant, on_navigate=self.switch_view)
+        self.views["chat"] = ConversationView(self.view_container, self.assistant)
+        self.views["tasks"] = TasksView(self.view_container, self.assistant)
+        self.views["system"] = SystemHudView(self.view_container, self.assistant)
+        self.views["memory"] = MemoryView(self.view_container, self.assistant)
+        self.views["tools"] = ToolsView(self.view_container, self.assistant)
+        self.views["vision"] = VisionView(self.view_container, self.assistant)
+        self.views["dev"] = DeveloperView(self.view_container, self.assistant)
+        self.views["auto"] = AutomationView(self.view_container, self.assistant)
+        self.views["settings"] = SettingsView(self.view_container, self.assistant)
+
+        # Show Home View
+        self.views["home"].pack(fill="both", expand=True)
+
+        # 4. Bottom Unified Voice & Text Command Bar
+        self.bottom_bar = tk.Frame(self.root, bg=UITheme.BG_SURFACE, padx=16, pady=8)
+        self.bottom_bar.pack(fill="x")
 
         self.mic_btn = tk.Button(
-            input_frame,
+            self.bottom_bar,
             text="🎙️ Talk",
-            font=("Segoe UI", 9, "bold"),
-            fg="#0d1117",
-            bg="#00d2ff",
-            activebackground="#79c0ff",
+            font=UITheme.FONT_BODY_BOLD,
+            fg=UITheme.BG_DARK,
+            bg=UITheme.CYAN,
+            activebackground=UITheme.TEXT_HIGHLIGHT,
             bd=0,
-            padx=8,
-            pady=3,
+            padx=12,
+            pady=4,
             cursor="hand2",
-            command=self._on_orb_click,
+            command=self._on_mic_click,
         )
-        self.mic_btn.pack(side="left", padx=(0, 6))
+        self.mic_btn.pack(side="left", padx=(0, 8))
 
         self.entry = tk.Entry(
-            input_frame,
-            font=("Segoe UI", 10),
-            fg="#f0f6fc",
-            bg="#21262d",
-            insertbackground="#00d2ff",
+            self.bottom_bar,
+            font=UITheme.FONT_BODY,
+            fg=UITheme.TEXT_PRIMARY,
+            bg=UITheme.BG_INPUT,
+            insertbackground=UITheme.CYAN,
             bd=0,
             highlightthickness=1,
-            highlightcolor="#00d2ff",
-            highlightbackground="#30363d",
+            highlightcolor=UITheme.CYAN,
+            highlightbackground=UITheme.BORDER_MUTED,
         )
-        self.entry.pack(side="left", fill="x", expand=True, ipady=4, padx=(0, 6))
+        self.entry.pack(side="left", fill="x", expand=True, ipady=5, padx=(0, 8))
         self.entry.bind("<Return>", lambda _: self._on_send())
 
-        send_btn = tk.Button(
-            input_frame,
-            text="➤",
-            font=("Segoe UI", 9, "bold"),
-            fg="#ffffff",
-            bg="#238636",
-            activebackground="#2ea043",
+        self.send_btn = tk.Button(
+            self.bottom_bar,
+            text="➤ Send",
+            font=UITheme.FONT_BODY_BOLD,
+            fg=UITheme.BG_DARK,
+            bg=UITheme.EMERALD,
+            activebackground=UITheme.TEXT_HIGHLIGHT,
             bd=0,
-            padx=10,
-            pady=3,
+            padx=12,
+            pady=4,
             cursor="hand2",
             command=self._on_send,
         )
-        send_btn.pack(side="right")
+        self.send_btn.pack(side="right")
 
-    def _on_orb_click(self) -> None:
+    def switch_view(self, view_name: str) -> None:
+        if view_name not in self.views or view_name == self.current_view_name:
+            return
+
+        # Hide current
+        self.views[self.current_view_name].pack_forget()
+        self.nav_buttons[self.current_view_name].config(fg=UITheme.TEXT_SECONDARY, bg=UITheme.BG_DARK)
+
+        # Show target
+        self.views[view_name].pack(fill="both", expand=True)
+        self.nav_buttons[view_name].config(fg=UITheme.CYAN, bg=UITheme.BG_CARD)
+        self.current_view_name = view_name
+
+    def _on_mic_click(self) -> None:
         if self._state == "speaking":
             self.assistant.cancel()
         else:
@@ -269,101 +259,116 @@ class AssistantWindow:
 
     def _on_task_event(self, task: Any, event: Any, message: str) -> None:
         def _update() -> None:
-            self.task_title_lbl.config(text=f"Active Task: {task.title}")
+            event_name = event.value if hasattr(event, "value") else str(event)
             total = len(task.steps) or 1
-            cur = task.current_step or (1 if event.value == "TASK_COMPLETED" else 0)
+            cur = task.current_step or (total if event_name == "TASK_COMPLETED" else 0)
             pct = int((cur / total) * 100) if total else 0
-            self.progress_bar["value"] = pct
-            self.task_step_lbl.config(text=message)
+
+            # Update Home Card
+            home_view: HomeView = self.views["home"]  # type: ignore
+            home_view.update_task_progress(task.title, message, cur, total, pct)
+
+            # Update Tasks View
+            tasks_view: TasksView = self.views["tasks"]  # type: ignore
+            tasks_view.update_live_plan(task, event_name, message)
 
         self.root.after(0, _update)
 
-    def _start_telemetry_polling(self) -> None:
-        def _poll() -> None:
-            # Check mic connection
-            if getattr(self.assistant, "audio_capture", None):
-                conn = self.assistant.audio_capture.is_connected
-                self.mic_health_lbl.config(
-                    text="Mic: ● CONNECTED" if conn else "Mic: ● DISCONNECTED",
-                    fg="#00ffa3" if conn else "#ff7b72",
-                )
-
-            # Check latest turn telemetry
-            latest = global_telemetry.get_latest()
-            if latest:
-                self.latency_lbl.config(
-                    text=(
-                        f"Speech-to-Audio: {latest.speech_end_to_first_audio_ms:.0f}ms | "
-                        f"STT: {latest.stt_duration_ms:.0f}ms | Router: {latest.router_duration_ms:.1f}ms | "
-                        f"Tool: {latest.tool_duration_ms:.0f}ms | TTS: {latest.tts_first_audio_ms:.0f}ms | "
-                        f"Total: {latest.total_latency_ms:.0f}ms"
-                    )
-                )
-
-            self.root.after(1000, _poll)
-
-        self.root.after(1000, _poll)
-
     def set_status(self, text: str) -> None:
-        self.root.after(0, lambda: self.status_lbl.config(text=text))
+        def _update() -> None:
+            home_view: HomeView = self.views.get("home")  # type: ignore
+            if home_view and hasattr(home_view, "status_sub_lbl"):
+                home_view.status_sub_lbl.config(text=text)
+
+        self.root.after(0, _update)
+
+    def set_state(self, state: Any, status_msg: str = "") -> None:
+        state_str = state.value if hasattr(state, "value") else str(state)
+        self._state = state_str
+        fg_color, label, _ = UITheme.STATE_CONFIG.get(state_str, (UITheme.CYAN, state_str.upper(), ""))
+
+        def _update() -> None:
+            self.state_badge.config(text=label, fg=fg_color)
+            home_view: HomeView = self.views.get("home")  # type: ignore
+            if home_view:
+                home_view.set_state(state_str, status_msg)
+
+        self.root.after(0, _update)
 
     def set_transcript(self, text: str) -> None:
-        self.root.after(0, lambda: self.user_lbl.config(text=f"You: {text}"))
+        def _update() -> None:
+            home_view: HomeView = self.views["home"]  # type: ignore
+            home_view.set_transcript(text)
+            chat_view: ConversationView = self.views["chat"]  # type: ignore
+            chat_view.append_user_message(text)
+
+        self.root.after(0, _update)
 
     def set_response(self, text: str) -> None:
         def _update() -> None:
-            self.resp_box.config(state="normal")
-            self.resp_box.delete("1.0", "end")
-            self.resp_box.insert("1.0", text)
-            self.resp_box.config(state="disabled")
-            self.resp_box.see("end")
+            home_view: HomeView = self.views["home"]  # type: ignore
+            home_view.set_response(text)
+            chat_view: ConversationView = self.views["chat"]  # type: ignore
+            chat_view.append_friday_message(text)
 
         self.root.after(0, _update)
 
-    def set_state(self, state: str) -> None:
-        self._state = state
-        badge_colors = {
-            "idle": ("#00ffa3", "READY"),
-            "listening_for_wake": ("#00ffa3", "WAKE LISTENING"),
-            "wake_detected": ("#ff0055", "WAKE DETECTED"),
-            "listening_for_command": ("#ff0055", "LISTENING"),
-            "transcribing": ("#e3b341", "TRANSCRIBING"),
-            "thinking": ("#e3b341", "THINKING"),
-            "executing": ("#bc8cff", "EXECUTING"),
-            "speaking": ("#00d2ff", "SPEAKING"),
-            "interrupted": ("#ff7b72", "INTERRUPTED"),
-            "error": ("#ff7b72", "ERROR"),
-        }
-        fg, label = badge_colors.get(state, ("#8b949e", state.upper()))
-        self.root.after(0, lambda: self.state_badge.config(text=label, fg=fg))
+    def show_confirmation(self, title: str, message: str, tool_name: str, on_approve: Any, on_deny: Any) -> None:
+        def _show() -> None:
+            ConfirmationDialog(
+                self.root,
+                title=title,
+                message=message,
+                tool_name=tool_name,
+                on_approve=on_approve,
+                on_deny=on_deny,
+            )
 
-    def _start_animation(self) -> None:
-        def _animate() -> None:
-            self._anim_phase += 0.1
-            self.canvas.delete("all")
-            cx, cy = 50, 50
+        self.root.after(0, _show)
 
-            if "listening" in self._state or self._state == "wake_detected":
-                radius = 26 + math.sin(self._anim_phase * 2) * 5
-                self.canvas.create_oval(cx - radius - 7, cy - radius - 7, cx + radius + 7, cy + radius + 7, fill="#381018", outline="")
-                self.canvas.create_oval(cx - radius, cy - radius, cx + radius, cy + radius, fill="#ff0055", outline="#ff7b72", width=2)
-            elif self._state in ("thinking", "executing", "transcribing"):
-                radius = 28
-                start_angle = (self._anim_phase * 150) % 360
-                self.canvas.create_oval(cx - radius, cy - radius, cx + radius, cy + radius, fill="#251e10", outline="")
-                self.canvas.create_arc(cx - radius, cy - radius, cx + radius, cy + radius, start=start_angle, extent=120, outline="#e3b341" if self._state != "executing" else "#bc8cff", width=4, style="arc")
-            elif self._state == "speaking":
-                radius = 26 + math.sin(self._anim_phase * 3) * 5
-                self.canvas.create_oval(cx - radius - 5, cy - radius - 5, cx + radius + 5, cy + radius + 5, fill="#0d2838", outline="")
-                self.canvas.create_oval(cx - radius, cy - radius, cx + radius, cy + radius, fill="#00d2ff", outline="#79c0ff", width=2)
-            else:
-                radius = 24 + math.sin(self._anim_phase) * 2
-                self.canvas.create_oval(cx - radius - 4, cy - radius - 4, cx + radius + 4, cy + radius + 4, fill="#12202e", outline="")
-                self.canvas.create_oval(cx - radius, cy - radius, cx + radius, cy + radius, fill="#1f6feb", outline="#00d2ff", width=2)
+    def _toggle_compact_mode(self) -> None:
+        self._is_compact = not self._is_compact
+        if self._is_compact:
+            self._saved_geometry = self.root.geometry()
+            self.nav_frame.pack_forget()
+            self.bottom_bar.pack_forget()
+            self.switch_view("home")
+            self.root.geometry("380x320")
+            self.compact_btn.config(text="🗖 Expand", fg=UITheme.CYAN)
+        else:
+            self.top_bar.pack(fill="x")
+            self.nav_frame.pack(fill="x", after=self.top_bar)
+            self.view_container.pack(fill="both", expand=True, after=self.nav_frame)
+            self.bottom_bar.pack(fill="x")
+            self.root.geometry(self._saved_geometry)
+            self.compact_btn.config(text="🗕 Pill", fg=UITheme.TEXT_PRIMARY)
 
-            self._after_id = str(self.root.after(40, _animate))
+    def _start_animation_loop(self) -> None:
+        def _tick() -> None:
+            home_view: HomeView = self.views["home"]  # type: ignore
+            home_view.core.update_frame(dt=0.05)
+            self._after_id = str(self.root.after(16, _tick))  # ~60 FPS
 
-        _animate()
+        _tick()
+
+    def _start_metrics_worker(self) -> None:
+        def _poll() -> None:
+            while True:
+                time.sleep(1.5)
+                try:
+                    import psutil
+                    cpu = psutil.cpu_percent()
+                    ram = psutil.virtual_memory().percent
+
+                    def _update(c=cpu, r=ram) -> None:
+                        self.quick_cpu_lbl.config(text=f"CPU: {c:.0f}%")
+                        self.quick_ram_lbl.config(text=f"RAM: {r:.0f}%")
+
+                    self.root.after(0, _update)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_poll, daemon=True).start()
 
     def run(self) -> None:
         self.assistant.start()
@@ -371,6 +376,9 @@ class AssistantWindow:
 
     def _on_close(self) -> None:
         if self._after_id:
-            self.root.after_cancel(self._after_id)
+            try:
+                self.root.after_cancel(self._after_id)
+            except Exception:
+                pass
         self.assistant.stop()
         self.root.destroy()

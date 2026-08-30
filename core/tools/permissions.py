@@ -28,6 +28,18 @@ class PermissionManager:
         else:
             self._allowed_overrides.discard(tool_name)
 
+    # Parameter aliases for flexible execution
+    PARAM_ALIASES: dict[str, list[str]] = {
+        "app_name": ["target", "name", "app", "application", "path"],
+        "query": ["q", "search_query", "search", "text"],
+        "path": ["file_path", "filepath", "target", "file"],
+        "message": ["text", "msg", "content", "prompt"],
+        "command": ["cmd"],
+        "text": ["content", "message"],
+        "percentage": ["percent", "level", "value"],
+        "level": ["percentage", "percent", "value"],
+    }
+
     def check_and_execute(
         self,
         tool: BaseTool,
@@ -35,10 +47,17 @@ class PermissionManager:
         confirmed: bool = False,
     ) -> ToolResult:
         """Evaluate tool execution safety and execute if authorized."""
-        # 1. Validate required parameters
+        # 1. Normalize parameter aliases and validate required parameters
         schema = tool.parameters or {}
         required_fields = schema.get("required", [])
         for field in required_fields:
+            if field not in kwargs:
+                # Check for aliases
+                for alias in self.PARAM_ALIASES.get(field, []):
+                    if alias in kwargs and kwargs[alias] is not None:
+                        kwargs[field] = kwargs[alias]
+                        break
+
             if field not in kwargs:
                 return ToolResult(
                     success=False,
